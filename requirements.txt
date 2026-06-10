@@ -1,0 +1,7 @@
+streamlit>=1.30
+streamlit-folium>=0.18
+folium>=0.15
+shapely>=2.0
+matplotlib>=3.7
+pandas>=2.0
+numpy>=1.24
