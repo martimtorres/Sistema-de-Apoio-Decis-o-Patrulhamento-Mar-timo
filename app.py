@@ -4,7 +4,6 @@ import numpy as np
 import folium
 from folium.plugins import HeatMap
 from streamlit_folium import st_folium
-import matplotlib.pyplot as plt
 
 from core import (
     PERFIS, ZONAS_POLIGONOS, DADOS_EXEMPLO,
@@ -87,8 +86,6 @@ with col_mapa:
     mapa.fit_bounds(bounds)
 
     # ── Gerar pontos para o heatmap ──────────────────────────────────────────
-    # Para cada zona, distribui N pontos aleatórios dentro do polígono,
-    # pesados pelos incidentes e gravidade — sem mostrar rectângulos.
     heat_points = []
     rng = np.random.default_rng(seed=42)
 
@@ -99,9 +96,7 @@ with col_mapa:
         poly    = ZONAS_POLIGONOS[zona]
         minx, miny, maxx, maxy = poly.bounds
 
-        # Número de pontos proporcional a incidentes * gravidade
         n_pontos = max(10, int(row['Num_Incidentes'] * row['Importancia'] / 5))
-        # Peso de intensidade por ponto (normalizado 0–1)
         peso = float(row['Pontuacao'])
 
         gerados = 0
@@ -122,11 +117,11 @@ with col_mapa:
         radius=28,
         blur=22,
         gradient={
-            0.0: "#313695",   # azul escuro  → baixa intensidade
-            0.3: "#74add1",   # azul claro
-            0.5: "#fee090",   # amarelo
-            0.7: "#f46d43",   # laranja
-            1.0: "#a50026",   # vermelho escuro → alta intensidade
+            0.0: "#313695",
+            0.3: "#74add1",
+            0.5: "#fee090",
+            0.7: "#f46d43",
+            1.0: "#a50026",
         },
     ).add_to(mapa)
 
@@ -158,8 +153,7 @@ with col_info:
     st.subheader("📋 Ranking")
     zona_top = int(df.iloc[0]['Zona_Patrulha'])
     st.success(
-        f"**Recomendação: Zona {zona_top}** — "
-        f"{ZONA_NOMES.get(zona_top, '')}  \n"
+        f"**Recomendação: Zona {zona_top}** — {ZONA_NOMES.get(zona_top, '')}  \n"
         f"Distância: {df.iloc[0]['Distancia']:.0f} km"
     )
 
@@ -169,61 +163,15 @@ with col_info:
     tabela['Pontuação'] = tabela['Pontuação'].round(3)
     st.dataframe(tabela, hide_index=True, use_container_width=True)
 
-    # ── Legenda das zonas ────────────────────────────────────────────────────
+    # ── Legenda das zonas simplificada ───────────────────────────────────────
     st.markdown("---")
     st.markdown("**🗂️ Legenda das zonas**")
-
-    # Gradiente de cor do heatmap como referência visual
-    st.markdown(
-        """
-        <div style="
-            display:flex; align-items:center; gap:8px;
-            margin-bottom:10px; font-size:12px; color:#555;
-        ">
-            <span>Baixa intensidade</span>
-            <div style="
-                flex:1; height:12px; border-radius:6px;
-                background: linear-gradient(to right,
-                    #313695, #74add1, #fee090, #f46d43, #a50026);
-            "></div>
-            <span>Alta intensidade</span>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    # Tabela de zonas com cor de fundo proporcional à pontuação
-    pontuacao_max = df['Pontuacao'].max()
     for _, row in df.iterrows():
         zona_id  = int(row['Zona_Patrulha'])
         nome     = ZONA_NOMES.get(zona_id, f"Zona {zona_id}")
-        pont     = row['Pontuacao']
         acid     = int(row['Acidentes_Ultimo_Ano'])
         inc      = int(row['Num_Incidentes'])
-        ratio    = pont / pontuacao_max if pontuacao_max else 0
-
-        # Cor de fundo: branco → vermelho suave
-        r = int(255)
-        g = int(255 - 160 * ratio)
-        b = int(255 - 160 * ratio)
-        bg = f"rgb({r},{g},{b})"
-
-        st.markdown(
-            f"""
-            <div style="
-                background:{bg}; border-radius:6px;
-                padding:6px 10px; margin-bottom:5px;
-                border-left: 4px solid {'#a50026' if acid > 0 else '#aaa'};
-                font-size:13px;
-            ">
-                <b>Z{zona_id}</b> — {nome}<br>
-                <span style="color:#555; font-size:12px;">
-                    {inc} incidentes · {acid} acidentes · pontuação {pont:.3f}
-                </span>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+        st.markdown(f"**Z{zona_id} – {nome}:**  \nacidentes {acid} · incidentes {inc}")
 
 # ════════════════════════════════════════════════════════════════════════════
 # JUSTIFICATIVAS
@@ -243,38 +191,3 @@ for j in justs:
         f"&nbsp;&nbsp;Critério dominante: **{j['criterio_dominante']}** "
         f"({j['peso_dominante']:.0%} da pontuação)"
     )
-
-# ════════════════════════════════════════════════════════════════════════════
-# DECOMPOSIÇÃO DA PONTUAÇÃO
-# ════════════════════════════════════════════════════════════════════════════
-st.markdown("---")
-st.subheader("📊 Decomposição da pontuação")
-
-criterios = {
-    'incidentes': ('Num_Incidentes_norm',       'Incidentes',  '#1f77b4'),
-    'gravidade':  ('Importancia_norm',          'Gravidade',   '#d62728'),
-    'acidentes':  ('Acidentes_Ultimo_Ano_norm', 'Acidentes',   '#ff7f0e'),
-    'distancia':  ('Distancia_norm',            'Proximidade', '#2ca02c'),
-}
-work = df.copy()
-for k, (col, _, _) in criterios.items():
-    work[f'c_{k}'] = pesos[k] * work[col]
-work = work.sort_values('Pontuacao').reset_index(drop=True)
-
-fig, ax = plt.subplots(figsize=(7, 4))
-labels   = [f"Z{int(z)}" for z in work['Zona_Patrulha']]
-esquerda = np.zeros(len(work))
-for k, (_, nome, cor) in criterios.items():
-    valores = work[f'c_{k}'].values
-    ax.barh(labels, valores, left=esquerda, color=cor,
-            label=nome, edgecolor='white')
-    esquerda += valores
-for i, total in enumerate(work['Pontuacao'].values):
-    ax.text(total + 0.005, i, f"{total:.3f}", va='center',
-            fontsize=9, fontweight='bold')
-ax.set_xlabel('Pontuação')
-ax.legend(loc='lower right', fontsize=8)
-ax.grid(axis='x', linestyle='--', alpha=0.4)
-ax.set_axisbelow(True)
-plt.tight_layout()
-st.pyplot(fig)
