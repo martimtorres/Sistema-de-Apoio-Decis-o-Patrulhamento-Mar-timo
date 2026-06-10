@@ -85,7 +85,7 @@ with col_mapa:
     mapa = folium.Map(location=[lat, lon], tiles="CartoDB positron")
     mapa.fit_bounds(bounds)
 
-    # ── Gerar pontos para o heatmap ──────────────────────────────────────────
+    # ── Gerar pontos para o heatmap
     heat_points = []
     rng = np.random.default_rng(seed=42)
 
@@ -93,7 +93,7 @@ with col_mapa:
         zona = int(row['Zona_Patrulha'])
         if zona not in ZONAS_POLIGONOS:
             continue
-        poly    = ZONAS_POLIGONOS[zona]
+        poly = ZONAS_POLIGONOS[zona]
         minx, miny, maxx, maxy = poly.bounds
 
         n_pontos = max(10, int(row['Num_Incidentes'] * row['Importancia'] / 5))
@@ -125,7 +125,7 @@ with col_mapa:
         },
     ).add_to(mapa)
 
-    # ── Marcador do navio ────────────────────────────────────────────────────
+    # ── Marcador do navio
     folium.Marker(
         [lat, lon],
         popup=f"Navio<br>({lat:.3f}, {lon:.3f})",
@@ -133,7 +133,7 @@ with col_mapa:
         icon=folium.Icon(color="blue", icon="anchor", prefix="fa"),
     ).add_to(mapa)
 
-    # ── Linha para zona recomendada ──────────────────────────────────────────
+    # ── Linha para zona recomendada
     zona_top = int(df.iloc[0]['Zona_Patrulha'])
     if zona_top in ZONAS_POLIGONOS:
         centroide_top = ZONAS_POLIGONOS[zona_top].centroid
@@ -163,10 +163,10 @@ with col_info:
     tabela['Pontuação'] = tabela['Pontuação'].round(3)
     st.dataframe(tabela, hide_index=True, use_container_width=True)
 
-    # ── Legenda das zonas simplificada ───────────────────────────────────────
+    # ── Legenda das zonas ordenada por Z# ──────────────────────────────
     st.markdown("---")
     st.markdown("**🗂️ Legenda das zonas**")
-    for _, row in df.iterrows():
+    for _, row in df.sort_values('Zona_Patrulha').iterrows():
         zona_id  = int(row['Zona_Patrulha'])
         nome     = ZONA_NOMES.get(zona_id, f"Zona {zona_id}")
         acid     = int(row['Acidentes_Ultimo_Ano'])
@@ -191,3 +191,38 @@ for j in justs:
         f"&nbsp;&nbsp;Critério dominante: **{j['criterio_dominante']}** "
         f"({j['peso_dominante']:.0%} da pontuação)"
     )
+
+# ════════════════════════════════════════════════════════════════════════════
+# DECOMPOSIÇÃO DA PONTUAÇÃO
+# ════════════════════════════════════════════════════════════════════════════
+st.markdown("---")
+st.subheader("📊 Decomposição da pontuação")
+
+criterios = {
+    'incidentes': ('Num_Incidentes_norm',       'Incidentes',  '#1f77b4'),
+    'gravidade':  ('Importancia_norm',          'Gravidade',   '#d62728'),
+    'acidentes':  ('Acidentes_Ultimo_Ano_norm', 'Acidentes',   '#ff7f0e'),
+    'distancia':  ('Distancia_norm',            'Proximidade', '#2ca02c'),
+}
+work = df.copy()
+for k, (col, _, _) in criterios.items():
+    work[f'c_{k}'] = pesos[k] * work[col]
+work = work.sort_values('Pontuacao').reset_index(drop=True)
+
+fig, ax = plt.subplots(figsize=(7, 4))
+labels   = [f"Z{int(z)}" for z in work['Zona_Patrulha']]
+esquerda = np.zeros(len(work))
+for k, (_, nome, cor) in criterios.items():
+    valores = work[f'c_{k}'].values
+    ax.barh(labels, valores, left=esquerda, color=cor,
+            label=nome, edgecolor='white')
+    esquerda += valores
+for i, total in enumerate(work['Pontuacao'].values):
+    ax.text(total + 0.005, i, f"{total:.3f}", va='center',
+            fontsize=9, fontweight='bold')
+ax.set_xlabel('Pontuação')
+ax.legend(loc='lower right', fontsize=8)
+ax.grid(axis='x', linestyle='--', alpha=0.4)
+ax.set_axisbelow(True)
+plt.tight_layout()
+st.pyplot(fig)
