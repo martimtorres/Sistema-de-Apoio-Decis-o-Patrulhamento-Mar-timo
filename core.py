@@ -11,10 +11,9 @@ from datetime import datetime
 from shapely.geometry import Point, Polygon
 
 PERFIS = {
-    'padrão':       {'incidentes': 0.40, 'gravidade': 0.30, 'acidentes': 0.20, 'distancia': 0.10},
-    'emergência':   {'incidentes': 0.15, 'gravidade': 0.35, 'acidentes': 0.20, 'distancia': 0.30},
-    'rotina':       {'incidentes': 0.50, 'gravidade': 0.20, 'acidentes': 0.20, 'distancia': 0.10},
-    'meteorologia': {'incidentes': 0.25, 'gravidade': 0.25, 'acidentes': 0.10, 'distancia': 0.40},
+    'rotina':                          {'incidentes': 0.50, 'gravidade': 0.20, 'acidentes': 0.20, 'distancia': 0.10},
+    'emergência':                      {'incidentes': 0.15, 'gravidade': 0.35, 'acidentes': 0.20, 'distancia': 0.30},
+    'condições atmosféricas adversas': {'incidentes': 0.25, 'gravidade': 0.25, 'acidentes': 0.10, 'distancia': 0.40},
 }
 
 ZONAS_POLIGONOS = {
@@ -31,7 +30,7 @@ def haversine_km(lat1, lon1, lat2, lon2):
     R = 6371.0
     lat1, lon1, lat2, lon2 = map(radians, [lat1, lon1, lat2, lon2])
     dlat, dlon = lat2 - lat1, lon2 - lon1
-    a = sin(dlat/2)**2 + cos(lat1) * cos(lat2) * sin(dlon/2)**2
+    a = sin(dlat / 2) ** 2 + cos(lat1) * cos(lat2) * sin(dlon / 2) ** 2
     return 2 * R * asin(sqrt(a))
 
 
@@ -49,7 +48,7 @@ def calcular_distancias(pos_navio, zonas=ZONAS_POLIGONOS):
 
 
 def score_incidentes_com_decaimento(datas_incidentes, lambda_anual=0.3,
-                                     hoje: datetime | None = None):
+                                    hoje: datetime | None = None):
     if hoje is None:
         hoje = datetime.now()
     if len(datas_incidentes) == 0:
