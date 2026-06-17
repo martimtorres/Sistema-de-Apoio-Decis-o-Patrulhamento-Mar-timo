@@ -1,8 +1,7 @@
-
 """
 Sistema de Apoio à Decisão para Patrulhamento Marítimo — núcleo.
 Zonas geradas como buffers sucessivos (anéis) a partir da costa portuguesa,
-em milhas náuticas, no CRS projetado EPSG:3763 (ETRS89/PT-TM06).
+em milhas náuticas, no CRS projetado EPSG:3763 (ETRS89/ PT-TM06).
 """
 
 from __future__ import annotations
@@ -11,21 +10,20 @@ import pandas as pd
 from math import radians, sin, cos, asin, sqrt
 from datetime import datetime
 
-from shapely.geometry import Point, LineString, Polygon, MultiPolygon
-from shapely.ops import transform, unary_union
+from shapely.geometry import Point, LineString, Polygon
+from shapely.ops import transform
 from pyproj import Transformer
 
 # ── Constantes ───────────────────────────────────────────────────────────────
 NM_TO_M = 1852.0  # 1 milha náutica em metros
 
-# Limites das zonas em milhas náuticas (cumulativos)
 LIMITES_NM = {
     1: (0,   12),
     2: (12,  24),
     3: (24,  50),
     4: (50,  100),
     5: (100, 200),
-    6: (200, 400),   # "alto mar" — limitado a 400 NM para o mapa ser desenhável
+    6: (200, 400),
 }
 
 ZONA_NOMES = {
@@ -38,8 +36,6 @@ ZONA_NOMES = {
 }
 
 # ── Linha de costa simplificada de Portugal continental ──────────────────────
-# Pontos (lon, lat) ao longo da costa, de norte para sul.
-# Suficiente para gerar buffers realistas; substituível por shapefile real.
 COSTA_PT = LineString([
     (-8.87, 41.85),  # Caminha
     (-8.78, 41.69),  # Viana do Castelo
@@ -48,7 +44,7 @@ COSTA_PT = LineString([
     (-8.65, 40.64),  # Aveiro
     (-8.86, 40.15),  # Figueira da Foz
     (-9.13, 39.60),  # Peniche
-    (-9.42, 39.36),  # Cabo da Roca (aprox.)
+    (-9.42, 39.36),  # Cabo da Roca
     (-9.50, 38.78),  # Cabo Raso
     (-9.21, 38.69),  # Cascais
     (-9.13, 38.70),  # Lisboa
@@ -61,8 +57,7 @@ COSTA_PT = LineString([
     (-7.40, 37.18),  # Vila Real de Santo António
 ])
 
-# Polígono aproximado de Portugal continental (para "subtrair" a terra).
-# Simplificado — só precisa de cobrir a massa terrestre.
+# Polígono aproximado de Portugal continental (para subtrair a terra).
 TERRA_PT = Polygon([
     (-8.87, 41.85), (-8.20, 42.00), (-6.50, 41.90),
     (-6.20, 39.70), (-7.00, 38.20), (-7.40, 37.18),
@@ -73,7 +68,6 @@ TERRA_PT = Polygon([
 ])
 
 # ── Transformações de CRS ────────────────────────────────────────────────────
-# EPSG:4326 (WGS84 lon/lat) ↔ EPSG:3763 (ETRS89 / PT-TM06, metros)
 _to_metros = Transformer.from_crs("EPSG:4326", "EPSG:3763", always_xy=True).transform
 _to_graus  = Transformer.from_crs("EPSG:3763", "EPSG:4326", always_xy=True).transform
 
@@ -95,26 +89,16 @@ def _construir_zonas():
     costa_m = _projetar(COSTA_PT)
     terra_m = _projetar(TERRA_PT)
 
-    # Buffers cumulativos (em metros) — discos centrados na linha de costa
-    buffers_m = {
-        z: costa_m.buffer(lim_ext * NM_TO_M, resolution=64)
-        for z, (_, lim_ext) in LIMITES_NM.items()
-    }
-
     zonas = {}
-    anterior = None
-    for z, (lim_int, _) in LIMITES_NM.items():
-        atual = buffers_m[z]
+    for z, (lim_int, lim_ext) in LIMITES_NM.items():
+        buf_ext = costa_m.buffer(lim_ext * NM_TO_M, resolution=64)
         if lim_int == 0:
-            anel = atual
+            anel = buf_ext
         else:
             buf_int = costa_m.buffer(lim_int * NM_TO_M, resolution=64)
-            anel = atual.difference(buf_int)
-        # Remover terra
+            anel = buf_ext.difference(buf_int)
         anel = anel.difference(terra_m)
         zonas[z] = _desprojetar(anel)
-        anterior = atual
-
     return zonas
 
 
@@ -150,7 +134,7 @@ def zona_por_distancia(dist_nm):
     for z, (lim_int, lim_ext) in LIMITES_NM.items():
         if lim_int <= dist_nm < lim_ext:
             return z
-    return 6  # alto mar por defeito
+    return 6
 
 
 def distancia_a_zona(pos_navio, zona_id):
@@ -160,13 +144,22 @@ def distancia_a_zona(pos_navio, zona_id):
     ponto = Point(lon, lat)
     if poly.contains(ponto):
         return 0.0
-    # Aproximação: ponto mais próximo na fronteira
     p_proximo = poly.boundary.interpolate(poly.boundary.project(ponto))
     return haversine_km(lat, lon, p_proximo.y, p_proximo.x)
 
 
 def calcular_distancias(pos_navio, zonas=ZONAS_POLIGONOS):
     return {z: distancia_a_zona(pos_navio, z) for z in zonas}
+
+
+def score_incidentes_com_decaimento(datas_incidentes, lambda_anual=0.3,
+                                    hoje: datetime | None = None):
+    if hoje is None:
+        hoje = datetime.now()
+    if len(datas_incidentes) == 0:
+        return 0.0
+    idades = np.array([(hoje - d).days / 365.25 for d in datas_incidentes])
+    return float(np.sum(np.exp(-lambda_anual * idades)))
 
 
 # ── Normalização e pontuação ─────────────────────────────────────────────────
@@ -222,7 +215,7 @@ def agregar_incidentes_por_zona(incidentes_pontuais: pd.DataFrame) -> pd.DataFra
         Importancia=('gravidade', 'mean'),
         Acidentes_Ultimo_Ano=('acidente', 'sum'),
     ).reset_index()
-    # Garantir todas as zonas presentes
+
     for z in LIMITES_NM:
         if z not in agg['Zona_Patrulha'].values:
             agg = pd.concat([agg, pd.DataFrame([{
@@ -240,16 +233,17 @@ def gerar_justificativa(df, distancias, pesos, top_k=3):
         'acidentes':  ('Acidentes_Ultimo_Ano_norm', 'acidentes recentes'),
         'distancia':  ('Distancia_norm',            'proximidade'),
     }
-    work = df.sort_values('Pontuacao', ascending=False).reset_index(drop=True)
-    contribs_cols = {}
+    work = df.copy()
     for k, (col, _) in criterios.items():
-        contribs_cols[k] = pesos[k] * work[col]
+        work[f'contrib_{k}'] = pesos[k] * work[col]
+    work['Pontuacao'] = sum(work[f'contrib_{k}'] for k in criterios)
+    work = work.sort_values('Pontuacao', ascending=False).reset_index(drop=True)
 
     justificativas = []
     for i in range(min(top_k, len(work))):
         row = work.iloc[i]
         zona = int(row['Zona_Patrulha'])
-        contribs = {k: contribs_cols[k].iloc[i] for k in criterios}
+        contribs = {k: row[f'contrib_{k}'] for k in criterios}
         dominante = max(contribs, key=contribs.get)
         peso_dom = contribs[dominante] / row['Pontuacao'] if row['Pontuacao'] else 0
         _, label_dom = criterios[dominante]
@@ -275,7 +269,6 @@ def gerar_justificativa(df, distancias, pesos, top_k=3):
     return justificativas
 
 
-# ── Dados de exemplo agregados (fallback) ────────────────────────────────────
 DADOS_EXEMPLO = pd.DataFrame({
     'Zona_Patrulha':        [1, 2, 3, 4, 5, 6],
     'Num_Incidentes':       [120, 85, 200, 40, 60, 30],
