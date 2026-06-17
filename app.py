@@ -16,10 +16,10 @@ from core import (
 ZONA_NOMES = {
     1: "Águas territoriais",
     2: "Zona contígua",
-    3: "Zona económica exclusiva",
-    4: "Plataforma continental",
-    5: "Alto mar costeiro",
-    6: "Atlântico aberto",
+    3: "Área costeira alargada",
+    4: "Zona intermédia da ZEE",
+    5: "Limite da ZEE",
+    6: "Alto mar",
 }
 
 st.set_page_config(page_title="Patrulhamento Marítimo", layout="wide")
@@ -129,6 +129,55 @@ with col_mapa:
             1.0: "#a50026",   # vermelho escuro → alta intensidade
         },
     ).add_to(mapa)
+
+    # ── Contornos das zonas + nº de incidentes/acidentes ─────────────────────
+    # Desenha o limite de cada zona (para se ver onde fica cada uma) e um
+    # rótulo com o nome da zona e o número de incidentes/acidentes.
+    for zona_id, poly in ZONAS_POLIGONOS.items():
+        coords  = [[c[1], c[0]] for c in poly.exterior.coords]  # [lat, lon]
+        nome    = ZONA_NOMES.get(zona_id, f"Zona {zona_id}")
+        linha   = df[df['Zona_Patrulha'] == zona_id]
+        inc     = int(linha.iloc[0]['Num_Incidentes'])        if not linha.empty else 0
+        acid    = int(linha.iloc[0]['Acidentes_Ultimo_Ano'])  if not linha.empty else 0
+
+        folium.Polygon(
+            locations=coords,
+            color="#2c3e50",
+            weight=2,
+            opacity=0.8,
+            fill=True,
+            fill_color="#2c3e50",
+            fill_opacity=0.03,
+            dash_array="6 4",
+            tooltip=folium.Tooltip(
+                f"<b>Z{zona_id} — {nome}</b><br>"
+                f"{inc} incidentes · {acid} acidentes"
+            ),
+        ).add_to(mapa)
+
+        centroide = poly.centroid
+        folium.Marker(
+            [centroide.y, centroide.x],
+            icon=folium.DivIcon(html=f"""
+                <div style="
+                    transform: translate(-50%, -50%);
+                    text-align:center; white-space:nowrap;
+                    pointer-events:none;
+                ">
+                    <div style="
+                        font-size:11px; font-weight:700; color:#1a1a1a;
+                        background:rgba(255,255,255,0.88);
+                        border:1px solid #2c3e50; border-radius:5px;
+                        padding:2px 7px; line-height:1.3;
+                    ">
+                        Z{zona_id} — {nome}
+                        <div style="font-size:10px; font-weight:600; color:#a50026;">
+                            ⚠ {inc} incid. · {acid} acid.
+                        </div>
+                    </div>
+                </div>
+            """),
+        ).add_to(mapa)
 
     # ── Marcador do navio ────────────────────────────────────────────────────
     folium.Marker(
