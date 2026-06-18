@@ -1,5 +1,4 @@
-"""
-Sistema de Apoio à Decisão para Patrulhamento Marítimo — núcleo.
+stema de Apoio à Decisão para Patrulhamento Marítimo — núcleo.
 
 Inclui: perfis de pesos, decaimento temporal, e divisão do mar em faixas
 de distância à costa portuguesa (Z1..Z6), construídas por buffers
@@ -7,9 +6,10 @@ sucessivos à linha de costa — não por polígonos desenhados manualmente.
 """
 
 from __future__ import annotations
+import re
 import numpy as np
 import pandas as pd
-from math import radians, sin, cos, asin, sqrt
+from math import radians, sin, cos, asin, sqrt, degrees, atan2
 from datetime import datetime
 from shapely.geometry import Point, Polygon, LineString, box
 from shapely.ops import transform, nearest_points
@@ -110,10 +110,32 @@ def _construir_zonas():
         zonas[i] = anel.intersection(area_interesse).difference(massa_terrestre)
 
     zonas[6] = area_interesse.difference(buffers[LIMITES_NM[-1]]).difference(massa_terrestre)
-    return zonas
+    return zonas, massa_terrestre
 
 
-ZONAS_POLIGONOS = _construir_zonas()
+ZONAS_POLIGONOS, MASSA_TERRESTRE = _construir_zonas()
+
+# Áreas marítimas válidas (exclui portos, rios, águas interiores e estaleiros).
+AREAS_MARITIMAS = {
+    'Territorial sea', 'High sea - Within EEZ', 'High sea - Outside EEZ',
+    'High sea - n/a', 'High sea',
+}
+AREAS_TERRESTRES = {
+    'Internal waters - Port area', 'Internal waters - Channel; river',
+    'Internal waters - Other', 'Internal waters - Archipelago fairway',
+    'Inland waters - River', 'Inland waters - Channel', 'Inland waters - Lake',
+    'Inland waters - Other', 'Repair yard', 'Unknown',
+}
+
+# Consumo por defeito: litros por milha náutica (ajustável na interface).
+CONSUMO_LITROS_NM_PADRAO = 8.0
+
+SEVERIDADE_IMPORTANCIA = {
+    'Very serious': 10.0,
+    'Serious': 8.0,
+    'Less Serious': 5.0,
+    'Marine incident': 4.0,
+}
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -165,6 +187,161 @@ def zona_por_distancia_nm(distancia_nm):
 def zona_atual_navio(pos_navio):
     lat, lon = pos_navio
     return zona_por_distancia_nm(distancia_costa_nm(lat, lon))
+
+
+def ponto_em_terra(lat, lon):
+    """True se o ponto estiver a leste da linha de costa (continente)."""
+    return MASSA_TERRESTRE.contains(Point(lon, lat))
+
+
+def em_aguas_portugal(lat, lon):
+    """Bounding boxes aproximadas: continental, Açores e Madeira."""
+    if 36.5 <= lat <= 42.5 and -10.5 <= lon <= -7.0:
+        return True
+    if 36.5 <= lat <= 40.0 and -31.5 <= lon <= -24.5:
+        return True
+    if 32.0 <= lat <= 33.5 and -17.5 <= lon <= -15.5:
+        return True
+    return False
+
+
+def parse_coordenada_dms(texto, eixo='lat'):
+    """Converte '38°41.08' N' ou '9°0.03' W' para graus decimais."""
+    if pd.isna(texto):
+        return None
+    s = re.sub(r'["""]', '', str(texto).strip())
+    padrao = (
+        r"(\d+)°(\d+(?:\.\d+)?)'?\s*([NS])" if eixo == 'lat'
+        else r"(\d+)°(\d+(?:\.\d+)?)'?\s*([EW])"
+    )
+    m = re.match(padrao, s)
+    if not m:
+        return None
+    graus, minutos, hem = float(m.group(1)), float(m.group(2)), m.group(3)
+    dec = graus + minutos / 60.0
+    if hem in ('S', 'W'):
+        dec = -dec
+    return dec
+
+
+def calcular_autonomia(combustivel_litros, consumo_litros_nm=CONSUMO_LITROS_NM_PADRAO):
+    """
+    Autonomia total (ida) e raio de ida-e-volta a partir do combustível disponível.
+
+    Returns
+    -------
+    dict com alcance_total_nm, alcance_total_km, raio_ida_volta_nm, raio_ida_volta_km
+    """
+    if consumo_litros_nm <= 0 or combustivel_litros <= 0:
+        return {
+            'alcance_total_nm': 0.0,
+            'alcance_total_km': 0.0,
+            'raio_ida_volta_nm': 0.0,
+            'raio_ida_volta_km': 0.0,
+        }
+    alcance_nm = combustivel_litros / consumo_litros_nm
+    raio_nm = alcance_nm / 2.0
+    return {
+        'alcance_total_nm': alcance_nm,
+        'alcance_total_km': alcance_nm * 1.852,
+        'raio_ida_volta_nm': raio_nm,
+        'raio_ida_volta_km': raio_nm * 1.852,
+    }
+
+
+def circulo_autonomia(lat, lon, raio_km, n_pontos=72):
+    """Polígono (lon, lat) aproximando um círculo geodésico."""
+    if raio_km <= 0:
+        return []
+    R = 6371.0
+    lat_r, lon_r = radians(lat), radians(lon)
+    ang_dist = raio_km / R
+    pontos = []
+    for i in range(n_pontos + 1):
+        bearing = radians(i * 360.0 / n_pontos)
+        lat2 = asin(
+            sin(lat_r) * cos(ang_dist) +
+            cos(lat_r) * sin(ang_dist) * cos(bearing)
+        )
+        lon2 = lon_r + atan2(
+            sin(bearing) * sin(ang_dist) * cos(lat_r),
+            cos(ang_dist) - sin(lat_r) * sin(lat2),
+        )
+        pontos.append((degrees(lon2), degrees(lat2)))
+    return pontos
+
+
+def _importancia_de_severidade(severidade):
+    return SEVERIDADE_IMPORTANCIA.get(str(severidade).strip(), 5.0)
+
+
+def _marcar_acidente(row):
+    vidas = pd.to_numeric(row.get('Lives lost Occurrence-Total', 0), errors='coerce') or 0
+    if vidas > 0:
+        return 1
+    if str(row.get('Did the ship sink?', '')).strip().lower() == 'yes':
+        return 1
+    sev = str(row.get('Occurrence severity', '')).strip()
+    if sev in ('Very serious', 'Serious'):
+        return 1
+    navio = str(row.get('Occurrence with ship(s)', '')).lower()
+    if any(k in navio for k in ('collision', 'grounding', 'foundering', 'fire/explosion', 'flooding')):
+        return 1
+    return 0
+
+
+def filtrar_incidentes_maritimos(df):
+    """Remove registos em terra, águas interiores e fora das águas jurisdicionais PT."""
+    df = df.copy()
+    if 'Lat' not in df.columns:
+        df['Lat'] = df.get('Latitude', pd.Series(dtype=float)).apply(
+            lambda x: parse_coordenada_dms(x, 'lat')
+        )
+    if 'Lon' not in df.columns:
+        df['Lon'] = df.get('Longitude', pd.Series(dtype=float)).apply(
+            lambda x: parse_coordenada_dms(x, 'lon')
+        )
+
+    df = df.dropna(subset=['Lat', 'Lon'])
+
+    if 'Sea area of occurrence' in df.columns:
+        df = df[~df['Sea area of occurrence'].isin(AREAS_TERRESTRES)]
+        df = df[df['Sea area of occurrence'].isin(AREAS_MARITIMAS)]
+
+    df = df[df.apply(lambda r: em_aguas_portugal(r['Lat'], r['Lon']), axis=1)]
+    df = df[~df.apply(lambda r: ponto_em_terra(r['Lat'], r['Lon']), axis=1)]
+    return df.reset_index(drop=True)
+
+
+def carregar_incidentes_gama(caminho_csv):
+    """
+    Carrega o export GAMA, converte coordenadas DMS e filtra apenas o mar.
+    Devolve DataFrame com Lat, Lon, Importancia, Acidente.
+    """
+    bruto = pd.read_csv(caminho_csv)
+    return normalizar_incidentes_pontuais(bruto)
+
+
+def normalizar_incidentes_pontuais(df_bruto):
+    """Converte export GAMA ou CSV Lat/Lon num DataFrame marítimo padronizado."""
+    mar = filtrar_incidentes_maritimos(df_bruto)
+    if 'Importancia' not in mar.columns:
+        if 'Occurrence severity' in mar.columns:
+            mar['Importancia'] = mar['Occurrence severity'].apply(_importancia_de_severidade)
+        else:
+            mar['Importancia'] = 5.0
+    if 'Acidente' not in mar.columns:
+        mar['Acidente'] = mar.apply(_marcar_acidente, axis=1).astype(int)
+    return mar[['Lat', 'Lon', 'Importancia', 'Acidente']].copy()
+
+
+def exportar_incidentes_maritimos(caminho_entrada, caminho_saida):
+    """Gera CSV limpo (apenas mar) a partir do export GAMA original."""
+    limpo = carregar_incidentes_gama(caminho_entrada)
+    bruto = pd.read_csv(caminho_entrada)
+    mar = filtrar_incidentes_maritimos(bruto)
+    mar.to_csv(caminho_saida, index=False)
+    return len(bruto), len(limpo)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -330,3 +507,4 @@ DADOS_EXEMPLO = pd.DataFrame({
     'Importancia':          [8, 6, 9, 4, 5, 3],
     'Acidentes_Ultimo_Ano': [5, 3, 8, 1, 2, 1],
 })
+
