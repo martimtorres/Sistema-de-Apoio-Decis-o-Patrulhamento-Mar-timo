@@ -442,9 +442,6 @@ with col_mapa:
 
     mc.add_to(mapa)
 
-    # Controlo de camadas (heatmap vs clusters)
-    folium.LayerControl(collapsed=False).add_to(mapa)
-
     st_folium(mapa, height=520, use_container_width=True)
 
 # ════════════════════════════════════════════════════════════════════════════
