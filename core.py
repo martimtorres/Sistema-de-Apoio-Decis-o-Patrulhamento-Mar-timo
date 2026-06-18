@@ -1,7 +1,9 @@
 """
 Sistema de Apoio à Decisão para Patrulhamento Marítimo — núcleo.
-Zonas geradas como buffers sucessivos (anéis) a partir da costa portuguesa,
-em milhas náuticas, no CRS projetado EPSG:3763 (ETRS89/ PT-TM06).
+
+Inclui: perfis de pesos, decaimento temporal, e divisão do mar em faixas
+de distância à costa portuguesa (Z1..Z6), construídas por buffers
+sucessivos à linha de costa — não por polígonos desenhados manualmente.
 """
 
 from __future__ import annotations
@@ -9,111 +11,114 @@ import numpy as np
 import pandas as pd
 from math import radians, sin, cos, asin, sqrt
 from datetime import datetime
+from shapely.geometry import Point, Polygon, LineString, box
+from shapely.ops import transform, nearest_points
 
-from shapely.geometry import Point, LineString, Polygon
-from shapely.ops import transform
-from pyproj import Transformer
-
-# ── Constantes ───────────────────────────────────────────────────────────────
-NM_TO_M = 1852.0  # 1 milha náutica em metros
-
-LIMITES_NM = {
-    1: (0,   12),
-    2: (12,  24),
-    3: (24,  50),
-    4: (50,  100),
-    5: (100, 200),
-    6: (200, 400),
-}
-
-ZONA_NOMES = {
-    1: "Águas territoriais (0–12 NM)",
-    2: "Zona contígua (12–24 NM)",
-    3: "Área costeira alargada (24–50 NM)",
-    4: "Zona intermédia da ZEE (50–100 NM)",
-    5: "Limite da ZEE (100–200 NM)",
-    6: "Alto mar (>200 NM)",
-}
-
-# ── Linha de costa simplificada de Portugal continental ──────────────────────
-COSTA_PT = LineString([
-    (-8.87, 41.85),  # Caminha
-    (-8.78, 41.69),  # Viana do Castelo
-    (-8.82, 41.40),  # Póvoa de Varzim
-    (-8.68, 41.18),  # Porto
-    (-8.65, 40.64),  # Aveiro
-    (-8.86, 40.15),  # Figueira da Foz
-    (-9.13, 39.60),  # Peniche
-    (-9.42, 39.36),  # Cabo da Roca
-    (-9.50, 38.78),  # Cabo Raso
-    (-9.21, 38.69),  # Cascais
-    (-9.13, 38.70),  # Lisboa
-    (-8.89, 38.51),  # Setúbal
-    (-8.99, 38.44),  # Sesimbra
-    (-8.93, 38.17),  # Sines
-    (-8.79, 37.10),  # Sagres
-    (-8.40, 37.08),  # Lagos
-    (-7.93, 37.01),  # Faro
-    (-7.40, 37.18),  # Vila Real de Santo António
-])
-
-# Polígono aproximado de Portugal continental (para subtrair a terra).
-TERRA_PT = Polygon([
-    (-8.87, 41.85), (-8.20, 42.00), (-6.50, 41.90),
-    (-6.20, 39.70), (-7.00, 38.20), (-7.40, 37.18),
-    (-8.79, 37.10), (-8.99, 38.10), (-9.50, 38.78),
-    (-9.42, 39.36), (-9.13, 39.60), (-8.86, 40.15),
-    (-8.65, 40.64), (-8.68, 41.18), (-8.82, 41.40),
-    (-8.78, 41.69), (-8.87, 41.85),
-])
-
-# ── Transformações de CRS ────────────────────────────────────────────────────
-_to_metros = Transformer.from_crs("EPSG:4326", "EPSG:3763", always_xy=True).transform
-_to_graus  = Transformer.from_crs("EPSG:3763", "EPSG:4326", always_xy=True).transform
-
-
-def _projetar(geom):
-    return transform(_to_metros, geom)
-
-
-def _desprojetar(geom):
-    return transform(_to_graus, geom)
-
-
-# ── Construção das zonas como anéis ──────────────────────────────────────────
-def _construir_zonas():
-    """
-    Cria as zonas Z1..Z6 como anéis sucessivos em torno da costa,
-    excluindo a terra. Retorna {id_zona: Polygon/MultiPolygon em WGS84}.
-    """
-    costa_m = _projetar(COSTA_PT)
-    terra_m = _projetar(TERRA_PT)
-
-    zonas = {}
-    for z, (lim_int, lim_ext) in LIMITES_NM.items():
-        buf_ext = costa_m.buffer(lim_ext * NM_TO_M, resolution=64)
-        if lim_int == 0:
-            anel = buf_ext
-        else:
-            buf_int = costa_m.buffer(lim_int * NM_TO_M, resolution=64)
-            anel = buf_ext.difference(buf_int)
-        anel = anel.difference(terra_m)
-        zonas[z] = _desprojetar(anel)
-    return zonas
-
-
-ZONAS_POLIGONOS = _construir_zonas()
-
-
-# ── Perfis ───────────────────────────────────────────────────────────────────
 PERFIS = {
     'rotina':                          {'incidentes': 0.50, 'gravidade': 0.20, 'acidentes': 0.20, 'distancia': 0.10},
     'emergência':                      {'incidentes': 0.15, 'gravidade': 0.35, 'acidentes': 0.20, 'distancia': 0.30},
     'condições atmosféricas adversas': {'incidentes': 0.25, 'gravidade': 0.25, 'acidentes': 0.10, 'distancia': 0.40},
 }
 
+# ═══════════════════════════════════════════════════════════════════════════
+# LINHA DE COSTA / LINHA DE BASE (aproximação)
+# ═══════════════════════════════════════════════════════════════════════════
+# Sequência de pontos (lon, lat), norte → sul, que aproxima a linha de costa
+# de Portugal continental. É uma simplificação para efeitos de visualização
+# e apoio à decisão — para uso operacional/legal, substituir por coordenadas
+# oficiais da linha de base (DGRM / IHPT / Decreto-Lei das águas marítimas).
+COSTA_PONTOS = [
+    (-8.835, 41.873),  # Caminha
+    (-8.838, 41.701),  # Viana do Castelo
+    (-8.789, 41.536),  # Esposende
+    (-8.762, 41.381),  # Póvoa de Varzim
+    (-8.711, 41.150),  # Porto / Foz do Douro
+    (-8.783, 41.007),  # Espinho
+    (-8.737, 40.645),  # Aveiro (Barra)
+    (-8.870, 40.151),  # Figueira da Foz
+    (-9.069, 39.601),  # Nazaré
+    (-9.407, 39.358),  # Peniche / Cabo Carvoeiro
+    (-9.498, 38.781),  # Cabo da Roca
+    (-9.422, 38.697),  # Cascais
+    (-9.217, 38.415),  # Cabo Espichel
+    (-8.880, 37.956),  # Sines
+    (-8.783, 37.726),  # Vila Nova de Milfontes
+    (-8.926, 37.500),  # Zambujeira do Mar
+    (-8.972, 37.021),  # Cabo de São Vicente
+    (-8.945, 37.006),  # Sagres
+    (-8.673, 37.103),  # Lagos
+    (-8.250, 37.084),  # Albufeira
+    (-7.930, 37.018),  # Faro
+    (-7.649, 37.125),  # Tavira
+    (-7.418, 37.193),  # Vila Real de Santo António
+]
+COSTA = LineString(COSTA_PONTOS)
 
-# ── Geometria / distâncias ───────────────────────────────────────────────────
+NM_EM_METROS = 1852.0
+LIMITES_NM = [12, 24, 50, 100, 200]   # fronteiras Z1|Z2|Z3|Z4|Z5|Z6
+
+ZONA_NOMES = {
+    1: "Águas territoriais",
+    2: "Zona contígua",
+    3: "Área costeira alargada",
+    4: "Zona intermédia da ZEE",
+    5: "Limite da ZEE",
+    6: "Alto mar",
+}
+ZONA_FAIXAS_NM = {
+    1: "0–12 NM",
+    2: "12–24 NM",
+    3: "24–50 NM",
+    4: "50–100 NM",
+    5: "100–200 NM",
+    6: "> 200 NM",
+}
+
+# ── Projeção planar local (equirretangular), só para fazer buffers em metros.
+# Erro tipicamente < 1% nesta latitude — aceitável para apoio à decisão,
+# não para fins de navegação/cartografia legal.
+_LAT_REF = 39.5
+_M_POR_GRAU_LAT = 111_320.0
+_M_POR_GRAU_LON = 111_320.0 * cos(radians(_LAT_REF))
+
+
+def _projetar(x, y, z=None):
+    return (x * _M_POR_GRAU_LON, y * _M_POR_GRAU_LAT)
+
+
+def _desprojetar(x, y, z=None):
+    return (x / _M_POR_GRAU_LON, y / _M_POR_GRAU_LAT)
+
+
+def _construir_zonas():
+    """Gera as 6 faixas (anéis) de distância à costa por buffers sucessivos."""
+    costa_proj = transform(_projetar, COSTA)
+    buffers_proj = {d: costa_proj.buffer(d * NM_EM_METROS) for d in LIMITES_NM}
+    buffers = {d: transform(_desprojetar, poly) for d, poly in buffers_proj.items()}
+
+    # Máscara grosseira de "terra" (tudo a leste da linha de costa), apenas
+    # para impedir que as faixas marítimas invadam visualmente o continente.
+    norte, sul = COSTA_PONTOS[0], COSTA_PONTOS[-1]
+    massa_terrestre = Polygon(COSTA_PONTOS + [(2.5, sul[1]), (2.5, norte[1])])
+
+    area_interesse = box(-15.0, 35.5, -6.0, 43.0)
+
+    fronteiras = [0] + LIMITES_NM
+    zonas = {}
+    for i, (inferior, superior) in enumerate(zip(fronteiras[:-1], fronteiras[1:]), start=1):
+        anel = buffers[superior] if inferior == 0 else buffers[superior].difference(buffers[inferior])
+        zonas[i] = anel.intersection(area_interesse).difference(massa_terrestre)
+
+    zonas[6] = area_interesse.difference(buffers[LIMITES_NM[-1]]).difference(massa_terrestre)
+    return zonas
+
+
+ZONAS_POLIGONOS = _construir_zonas()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# DISTÂNCIAS
+# ═══════════════════════════════════════════════════════════════════════════
 def haversine_km(lat1, lon1, lat2, lon2):
     R = 6371.0
     lat1, lon1, lat2, lon2 = map(radians, [lat1, lon1, lat2, lon2])
@@ -122,34 +127,117 @@ def haversine_km(lat1, lon1, lat2, lon2):
     return 2 * R * asin(sqrt(a))
 
 
-def distancia_costa_nm(lat, lon):
-    """Distância de um ponto (lat, lon) à linha de costa, em milhas náuticas."""
-    ponto_m = _projetar(Point(lon, lat))
-    costa_m = _projetar(COSTA_PT)
-    return ponto_m.distance(costa_m) / NM_TO_M
-
-
-def zona_por_distancia(dist_nm):
-    """Devolve o ID da zona correspondente à distância à costa."""
-    for z, (lim_int, lim_ext) in LIMITES_NM.items():
-        if lim_int <= dist_nm < lim_ext:
-            return z
-    return 6
-
-
-def distancia_a_zona(pos_navio, zona_id):
-    """Distância em km do navio à zona indicada (0 se já está dentro)."""
+def distancia_a_poligono(pos_navio, poligono):
+    """Distância (km) de um ponto (lat, lon) a um polígono/multipolígono."""
     lat, lon = pos_navio
-    poly = ZONAS_POLIGONOS[zona_id]
     ponto = Point(lon, lat)
-    if poly.contains(ponto):
+    if poligono is None or poligono.is_empty:
+        return float('nan')
+    if poligono.contains(ponto):
         return 0.0
-    p_proximo = poly.boundary.interpolate(poly.boundary.project(ponto))
+    _, p_proximo = nearest_points(poligono, ponto)
     return haversine_km(lat, lon, p_proximo.y, p_proximo.x)
 
 
 def calcular_distancias(pos_navio, zonas=ZONAS_POLIGONOS):
-    return {z: distancia_a_zona(pos_navio, z) for z in zonas}
+    return {z: distancia_a_poligono(pos_navio, poly) for z, poly in zonas.items()}
+
+
+def distancia_costa_km(lat, lon):
+    """Distância (km) de um ponto à linha de costa (não a uma zona)."""
+    ponto = Point(lon, lat)
+    _, p_proximo = nearest_points(COSTA, ponto)
+    return haversine_km(lat, lon, p_proximo.y, p_proximo.x)
+
+
+def distancia_costa_nm(lat, lon):
+    return distancia_costa_km(lat, lon) / 1.852
+
+
+def zona_por_distancia_nm(distancia_nm):
+    """Mapeia uma distância à costa (NM) para a zona 1..6 correspondente."""
+    for limite, zona in zip(LIMITES_NM, range(1, len(LIMITES_NM) + 1)):
+        if distancia_nm <= limite:
+            return zona
+    return len(LIMITES_NM) + 1  # zona 6 — alto mar
+
+
+def zona_atual_navio(pos_navio):
+    lat, lon = pos_navio
+    return zona_por_distancia_nm(distancia_costa_nm(lat, lon))
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# INCIDENTES PONTO-A-PONTO (Lat/Lon) → ATRIBUIÇÃO AUTOMÁTICA DE ZONA
+# ═══════════════════════════════════════════════════════════════════════════
+def atribuir_zonas_pontuais(df_pontos):
+    """
+    Recebe incidentes individuais com colunas 'Lat' e 'Lon' e calcula, para
+    cada um, a distância à costa (NM) e a zona de patrulha (1–6) a que
+    pertence, de acordo com as faixas definidas em LIMITES_NM.
+    """
+    df = df_pontos.copy()
+    df['Distancia_Costa_NM'] = [
+        distancia_costa_nm(lat, lon) for lat, lon in zip(df['Lat'], df['Lon'])
+    ]
+    df['Zona_Patrulha'] = df['Distancia_Costa_NM'].apply(zona_por_distancia_nm)
+    return df
+
+
+def agregar_por_zona(df_pontos_com_zona):
+    """
+    Agrega incidentes ponto-a-ponto (já com 'Zona_Patrulha') para o formato
+    usado pelo motor de pontuação: uma linha por zona (1–6), com contagem
+    de incidentes, gravidade média e nº de acidentes.
+    """
+    df = df_pontos_com_zona.copy()
+    if 'Importancia' not in df.columns:
+        df['Importancia'] = 5.0
+    if 'Acidente' not in df.columns:
+        df['Acidente'] = 0
+
+    agg = (
+        df.groupby('Zona_Patrulha')
+        .agg(
+            Num_Incidentes=('Zona_Patrulha', 'count'),
+            Importancia=('Importancia', 'mean'),
+            Acidentes_Ultimo_Ano=('Acidente', 'sum'),
+        )
+        .reset_index()
+    )
+    todas_zonas = pd.DataFrame({'Zona_Patrulha': list(ZONA_NOMES.keys())})
+    agg = todas_zonas.merge(agg, on='Zona_Patrulha', how='left').fillna(0)
+    agg['Zona_Patrulha'] = agg['Zona_Patrulha'].astype(int)
+    agg['Num_Incidentes'] = agg['Num_Incidentes'].astype(int)
+    agg['Acidentes_Ultimo_Ano'] = agg['Acidentes_Ultimo_Ano'].astype(int)
+    return agg
+
+
+def gerar_incidentes_exemplo_pontual(n_por_zona=None, seed=7):
+    """Gera incidentes ponto-a-ponto de exemplo, distribuídos dentro de cada
+    faixa de distância à costa — útil para testar o fluxo 'ponto a ponto'."""
+    if n_por_zona is None:
+        n_por_zona = {1: 40, 2: 25, 3: 18, 4: 10, 5: 6, 6: 3}
+    rng = np.random.default_rng(seed)
+    registos = []
+    for zona, n in n_por_zona.items():
+        poly = ZONAS_POLIGONOS.get(zona)
+        if poly is None or poly.is_empty:
+            continue
+        minx, miny, maxx, maxy = poly.bounds
+        gerados, tentativas = 0, 0
+        while gerados < n and tentativas < n * 50:
+            tentativas += 1
+            px, py = rng.uniform(minx, maxx), rng.uniform(miny, maxy)
+            if poly.contains(Point(px, py)):
+                registos.append({
+                    'Lat': py,
+                    'Lon': px,
+                    'Importancia': float(rng.integers(1, 11)),
+                    'Acidente': int(rng.random() < 0.12),
+                })
+                gerados += 1
+    return pd.DataFrame(registos)
 
 
 def score_incidentes_com_decaimento(datas_incidentes, lambda_anual=0.3,
@@ -162,7 +250,6 @@ def score_incidentes_com_decaimento(datas_incidentes, lambda_anual=0.3,
     return float(np.sum(np.exp(-lambda_anual * idades)))
 
 
-# ── Normalização e pontuação ─────────────────────────────────────────────────
 def normalizar(serie, inverter=False, metodo='linear'):
     s = serie.astype(float).copy()
     if metodo == 'log':
@@ -194,38 +281,6 @@ def calcular_pontuacao(df, pesos):
     )
 
 
-# ── Agregação de incidentes pontuais por distância à costa ───────────────────
-def agregar_incidentes_por_zona(incidentes_pontuais: pd.DataFrame) -> pd.DataFrame:
-    """
-    Recebe DataFrame com colunas: lat, lon, gravidade (1–10), acidente (0/1).
-    Calcula a distância à costa de cada ponto, atribui-lhe uma zona e
-    agrega contagens por zona.
-    """
-    if incidentes_pontuais.empty:
-        return DADOS_EXEMPLO.copy()
-
-    df = incidentes_pontuais.copy()
-    df['dist_nm'] = df.apply(
-        lambda r: distancia_costa_nm(r['lat'], r['lon']), axis=1
-    )
-    df['Zona_Patrulha'] = df['dist_nm'].apply(zona_por_distancia)
-
-    agg = df.groupby('Zona_Patrulha').agg(
-        Num_Incidentes=('lat', 'count'),
-        Importancia=('gravidade', 'mean'),
-        Acidentes_Ultimo_Ano=('acidente', 'sum'),
-    ).reset_index()
-
-    for z in LIMITES_NM:
-        if z not in agg['Zona_Patrulha'].values:
-            agg = pd.concat([agg, pd.DataFrame([{
-                'Zona_Patrulha': z, 'Num_Incidentes': 0,
-                'Importancia': 0, 'Acidentes_Ultimo_Ano': 0,
-            }])], ignore_index=True)
-    return agg.sort_values('Zona_Patrulha').reset_index(drop=True)
-
-
-# ── Justificativas ───────────────────────────────────────────────────────────
 def gerar_justificativa(df, distancias, pesos, top_k=3):
     criterios = {
         'incidentes': ('Num_Incidentes_norm',       'incidentes históricos'),
