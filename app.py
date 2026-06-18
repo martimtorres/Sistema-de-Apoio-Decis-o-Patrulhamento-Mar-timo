@@ -20,7 +20,10 @@ from core import (
 )
 
 CSV_GAMA_PADRAO = Path(__file__).resolve().parent / "OccurrenceExport-2026-01-19 11_53.csv"
-CSV_MARITIMO_PADRAO = Path(__file__).resolve().parent / "OccurrenceExport-maritimo.csv"
+# Base limpa principal — deve ficar na mesma pasta do app.py
+CSV_MARITIMO_PADRAO = Path(__file__).resolve().parent / "base_dados_incidentes.csv"
+# Nome alternativo, para compatibilidade com versões anteriores
+CSV_MARITIMO_ALTERNATIVO = Path(__file__).resolve().parent / "OccurrenceExport-maritimo.csv"
 
 # ── Paleta para as faixas de distância (neutra, para não competir com o heatmap)
 CORES_ZONA = {
@@ -78,6 +81,8 @@ st.sidebar.markdown(
 try:
     if CSV_MARITIMO_PADRAO.exists():
         pontos = carregar_incidentes_gama(CSV_MARITIMO_PADRAO)
+    elif CSV_MARITIMO_ALTERNATIVO.exists():
+        pontos = carregar_incidentes_gama(CSV_MARITIMO_ALTERNATIVO)
     elif CSV_GAMA_PADRAO.exists():
         pontos = carregar_incidentes_gama(CSV_GAMA_PADRAO)
     else:
@@ -126,17 +131,28 @@ with col_mapa:
         f"⛽ Combustível: **{combustivel_litros:.0f} L** · "
         f"distância total possível **{autonomia['alcance_total_nm']:.1f} NM** · "
         f"raio ida/volta **{autonomia['raio_ida_volta_nm']:.1f} NM** "
-        f"({autonomia['raio_ida_volta_km']:.0f} km)."
+        f"({autonomia['raio_ida_volta_km']:.0f} km).  \n"
+        f"🧭 A mostrar **{len(pontos_zonados)} ocorrências marítimas portuguesas** "
+        f"reais, incluindo Continente, Açores e Madeira."
     )
 
-    # Enquadrar o mapa pelas zonas 1–5 (a zona 6 / alto mar é aberta e
-    # tornaria o enquadramento por defeito demasiado afastado).
-    zonas_para_bounds = [ZONAS_POLIGONOS[z] for z in range(1, 6) if not ZONAS_POLIGONOS[z].is_empty]
-    minx = min(p.bounds[0] for p in zonas_para_bounds + [Point(lon, lat)])
-    miny = min(p.bounds[1] for p in zonas_para_bounds + [Point(lon, lat)])
-    maxx = max(p.bounds[2] for p in zonas_para_bounds + [Point(lon, lat)])
-    maxy = max(p.bounds[3] for p in zonas_para_bounds + [Point(lon, lat)])
-    bounds = [[miny - 0.3, minx - 0.3], [maxy + 0.3, maxx + 0.3]]
+    # Enquadrar o mapa por todos os incidentes reais + posição do navio.
+    # Assim não desaparecem ocorrências dos Açores/Madeira nem de zonas mais
+    # afastadas da costa continental.
+    pontos_bounds = [[float(lat), float(lon)]]
+    if not pontos_zonados.empty:
+        pontos_bounds += [
+            [float(r['Lat']), float(r['Lon'])]
+            for _, r in pontos_zonados.iterrows()
+        ]
+
+    min_lat = min(p[0] for p in pontos_bounds)
+    max_lat = max(p[0] for p in pontos_bounds)
+    min_lon = min(p[1] for p in pontos_bounds)
+    max_lon = max(p[1] for p in pontos_bounds)
+    margem_lat = max(0.3, (max_lat - min_lat) * 0.08)
+    margem_lon = max(0.3, (max_lon - min_lon) * 0.08)
+    bounds = [[min_lat - margem_lat, min_lon - margem_lon], [max_lat + margem_lat, max_lon + margem_lon]]
 
     mapa = folium.Map(location=[lat, lon], tiles="CartoDB positron")
     mapa.fit_bounds(bounds)
@@ -585,4 +601,3 @@ ax.grid(axis='x', linestyle='--', alpha=0.4)
 ax.set_axisbelow(True)
 plt.tight_layout()
 st.pyplot(fig)
-
