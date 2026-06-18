@@ -143,6 +143,19 @@ df = preparar_dataframe(dados, distancias)
 df['Pontuacao'] = calcular_pontuacao(df, pesos)
 df = df.sort_values('Pontuacao', ascending=False).reset_index(drop=True)
 
+# A distância usada aqui é a distância mínima do navio até à zona.
+# Só é considerada operacional se couber no raio de ida-e-volta calculado
+# a partir do combustível disponível.
+df['Dentro_Autonomia'] = df['Distancia'] <= autonomia['raio_ida_volta_km']
+df_alcancavel = df[df['Dentro_Autonomia']]
+if not df_alcancavel.empty:
+    linha_recomendada = df_alcancavel.iloc[0]
+    recomendacao_dentro_autonomia = True
+else:
+    linha_recomendada = df.iloc[0]
+    recomendacao_dentro_autonomia = False
+zona_recomendada = int(linha_recomendada['Zona_Patrulha'])
+
 zona_navio = zona_atual_navio(pos_navio)
 
 # ── Layout principal ──────────────────────────────────────────────────────────
@@ -156,7 +169,8 @@ with col_mapa:
     st.caption(
         f"📍 O navio está na **Zona {zona_navio} — "
         f"{ZONA_NOMES[zona_navio]}** ({ZONA_FAIXAS_NM[zona_navio]} da costa).  \n"
-        f"⛽ Autonomia: **{autonomia['alcance_total_nm']:.1f} NM** ida · "
+        f"⛽ Combustível: **{combustivel_litros:.0f} L** · "
+        f"distância total possível **{autonomia['alcance_total_nm']:.1f} NM** · "
         f"raio ida/volta **{autonomia['raio_ida_volta_nm']:.1f} NM** "
         f"({autonomia['raio_ida_volta_km']:.0f} km)."
     )
@@ -287,7 +301,7 @@ with col_mapa:
     ).add_to(mapa)
 
     # ── Linha para a zona recomendada ─────────────────────────────────────────
-    zona_top = int(df.iloc[0]['Zona_Patrulha'])
+    zona_top = zona_recomendada
     poly_top = ZONAS_POLIGONOS.get(zona_top)
     ponto_navio = Point(lon, lat)
     if poly_top is not None and not poly_top.is_empty and not poly_top.contains(ponto_navio):
@@ -520,17 +534,29 @@ with col_mapa:
 # ════════════════════════════════════════════════════════════════════════════
 with col_info:
     st.subheader("📋 Ranking")
-    zona_top = int(df.iloc[0]['Zona_Patrulha'])
-    st.success(
-        f"**Recomendação: Zona {zona_top}** — "
-        f"{ZONA_NOMES.get(zona_top, '')} ({ZONA_FAIXAS_NM.get(zona_top, '')})  \n"
-        f"Distância ao navio: {df.iloc[0]['Distancia']:.0f} km"
-    )
+    zona_top = zona_recomendada
+    distancia_recomendada = float(linha_recomendada['Distancia'])
 
-    tabela = df[['Zona_Patrulha', 'Distancia', 'Pontuacao']].copy()
+    if recomendacao_dentro_autonomia:
+        st.success(
+            f"**Recomendação: Zona {zona_top}** — "
+            f"{ZONA_NOMES.get(zona_top, '')} ({ZONA_FAIXAS_NM.get(zona_top, '')})  \n"
+            f"Distância ao navio: {distancia_recomendada:.0f} km · "
+            f"dentro do raio ida/volta."
+        )
+    else:
+        st.warning(
+            f"**Nenhuma zona prioritária está dentro da autonomia ida/volta.**  \n"
+            f"Zona de maior risco: Zona {zona_top} — "
+            f"{ZONA_NOMES.get(zona_top, '')} ({ZONA_FAIXAS_NM.get(zona_top, '')}), "
+            f"a {distancia_recomendada:.0f} km do navio."
+        )
+
+    tabela = df[['Zona_Patrulha', 'Distancia', 'Pontuacao', 'Dentro_Autonomia']].copy()
     tabela['Faixa'] = tabela['Zona_Patrulha'].map(ZONA_FAIXAS_NM)
-    tabela = tabela[['Zona_Patrulha', 'Faixa', 'Distancia', 'Pontuacao']]
-    tabela.columns = ['Zona', 'Faixa (à costa)', 'Dist. ao navio (km)', 'Pontuação']
+    tabela['Autonomia ida/volta'] = tabela['Dentro_Autonomia'].map({True: 'Sim', False: 'Não'})
+    tabela = tabela[['Zona_Patrulha', 'Faixa', 'Distancia', 'Autonomia ida/volta', 'Pontuacao']]
+    tabela.columns = ['Zona', 'Faixa (à costa)', 'Dist. ao navio (km)', 'Dentro da autonomia', 'Pontuação']
     tabela['Dist. ao navio (km)'] = tabela['Dist. ao navio (km)'].round(1)
     tabela['Pontuação'] = tabela['Pontuação'].round(3)
     st.dataframe(tabela, hide_index=True, use_container_width=True)
