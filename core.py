@@ -158,7 +158,7 @@ def distancia_a_poligono(pos_navio, poligono):
         return float('nan')
     if poligono.contains(ponto):
         return 0.0
-    _, p_proximo = nearest_points(poligono, ponto)
+    p_proximo, _ = nearest_points(poligono, ponto)
     return haversine_km(lat, lon, p_proximo.y, p_proximo.x)
 
 
@@ -169,7 +169,7 @@ def calcular_distancias(pos_navio, zonas=ZONAS_POLIGONOS):
 def distancia_costa_km(lat, lon):
     """Distância (km) de um ponto à linha de costa (não a uma zona)."""
     ponto = Point(lon, lat)
-    _, p_proximo = nearest_points(COSTA, ponto)
+    p_proximo, _ = nearest_points(COSTA, ponto)
     return haversine_km(lat, lon, p_proximo.y, p_proximo.x)
 
 
@@ -196,14 +196,91 @@ def ponto_em_terra(lat, lon):
 
 
 def em_aguas_portugal(lat, lon):
-    """Bounding boxes aproximadas: continental, Açores e Madeira."""
-    if 36.5 <= lat <= 42.5 and -10.5 <= lon <= -7.0:
+    """Bounding boxes aproximadas: continente, Açores e Madeira."""
+    if 36.3 <= lat <= 42.0 and -10.8 <= lon <= -7.0:
         return True
-    if 36.5 <= lat <= 40.0 and -31.5 <= lon <= -24.5:
+    if 36.0 <= lat <= 40.5 and -31.8 <= lon <= -24.0:
         return True
-    if 32.0 <= lat <= 33.5 and -17.5 <= lon <= -15.5:
+    if 32.0 <= lat <= 33.6 and -17.8 <= lon <= -15.3:
         return True
     return False
+
+
+# Trechos da costa usados para separar o lado marítimo do lado terrestre.
+# Índice 17 ≈ Sagres/Cabo de São Vicente: acima usa-se a costa oeste;
+# abaixo usa-se a costa sul do Algarve.
+_COSTA_OESTE = COSTA_PONTOS[:18]
+_COSTA_SUL = COSTA_PONTOS[17:]
+
+
+def _interp_lon_costa_oeste(lat):
+    """Longitude aproximada da costa oeste para uma dada latitude."""
+    candidatos = []
+    for (lon1, lat1), (lon2, lat2) in zip(_COSTA_OESTE, _COSTA_OESTE[1:]):
+        if min(lat1, lat2) <= lat <= max(lat1, lat2) and abs(lat2 - lat1) > 1e-9:
+            t = (lat - lat1) / (lat2 - lat1)
+            candidatos.append(lon1 + t * (lon2 - lon1))
+    if not candidatos:
+        return None
+    # Normalmente há apenas um candidato; a mediana evita saltos em zonas recortadas.
+    return float(np.median(candidatos))
+
+
+def _interp_lat_costa_sul(lon):
+    """Latitude aproximada da costa sul para uma dada longitude."""
+    candidatos = []
+    for (lon1, lat1), (lon2, lat2) in zip(_COSTA_SUL, _COSTA_SUL[1:]):
+        if min(lon1, lon2) <= lon <= max(lon1, lon2) and abs(lon2 - lon1) > 1e-9:
+            t = (lon - lon1) / (lon2 - lon1)
+            candidatos.append(lat1 + t * (lat2 - lat1))
+    if not candidatos:
+        return None
+    return float(np.median(candidatos))
+
+
+def ponto_em_mar_continental(lat, lon, margem_graus=0.003):
+    """
+    True se o ponto estiver no lado marítimo da costa continental portuguesa.
+
+    Esta verificação remove pontos em terra que passam apenas pela bounding box,
+    incluindo pontos a leste da costa no norte/centro e pontos a norte da costa
+    no Algarve. É uma máscara geométrica simples, adequada para limpeza visual
+    do dataset do protótipo.
+    """
+    if not (36.3 <= lat <= 42.0 and -10.8 <= lon <= -7.0):
+        return False
+
+    # Costa oeste: mar fica a oeste da linha de costa, isto é, longitude menor.
+    if lat >= 37.20:
+        lon_costa = _interp_lon_costa_oeste(lat)
+        if lon_costa is None:
+            return False
+        return lon <= lon_costa - margem_graus
+
+    # Zona sudoeste junto a Sagres/Cabo de São Vicente.
+    if lon <= -8.90:
+        return True
+
+    # Costa sul do Algarve: mar fica a sul da linha de costa, isto é, latitude menor.
+    lat_costa = _interp_lat_costa_sul(lon)
+    if lat_costa is None:
+        return False
+    return lat <= lat_costa - margem_graus
+
+
+def ponto_em_mar_valido(lat, lon):
+    """True se o ponto deve ser mantido como ocorrência marítima portuguesa."""
+    if not em_aguas_portugal(lat, lon):
+        return False
+
+    # Continente: aplica máscara mar/terra para não aceitar pontos em Espanha,
+    # Galiza, interior, portos/rio ou território continental.
+    if 36.3 <= lat <= 42.0 and -10.8 <= lon <= -7.0:
+        return ponto_em_mar_continental(lat, lon)
+
+    # Açores/Madeira: os registos de porto/águas interiores já são excluídos
+    # pelo campo "Sea area of occurrence"; mantém-se o mar envolvente.
+    return True
 
 
 def parse_coordenada_dms(texto, eixo='lat'):
@@ -309,8 +386,7 @@ def filtrar_incidentes_maritimos(df):
         df = df[~df['Sea area of occurrence'].isin(AREAS_TERRESTRES)]
         df = df[df['Sea area of occurrence'].isin(AREAS_MARITIMAS)]
 
-    df = df[df.apply(lambda r: em_aguas_portugal(r['Lat'], r['Lon']), axis=1)]
-    df = df[~df.apply(lambda r: ponto_em_terra(r['Lat'], r['Lon']), axis=1)]
+    df = df[df.apply(lambda r: ponto_em_mar_valido(float(r['Lat']), float(r['Lon'])), axis=1)]
     return df.reset_index(drop=True)
 
 
@@ -389,33 +465,6 @@ def agregar_por_zona(df_pontos_com_zona):
     agg['Num_Incidentes'] = agg['Num_Incidentes'].astype(int)
     agg['Acidentes_Ultimo_Ano'] = agg['Acidentes_Ultimo_Ano'].astype(int)
     return agg
-
-
-def gerar_incidentes_exemplo_pontual(n_por_zona=None, seed=7):
-    """Gera incidentes ponto-a-ponto de exemplo, distribuídos dentro de cada
-    faixa de distância à costa — útil para testar o fluxo 'ponto a ponto'."""
-    if n_por_zona is None:
-        n_por_zona = {1: 40, 2: 25, 3: 18, 4: 10, 5: 6, 6: 3}
-    rng = np.random.default_rng(seed)
-    registos = []
-    for zona, n in n_por_zona.items():
-        poly = ZONAS_POLIGONOS.get(zona)
-        if poly is None or poly.is_empty:
-            continue
-        minx, miny, maxx, maxy = poly.bounds
-        gerados, tentativas = 0, 0
-        while gerados < n and tentativas < n * 50:
-            tentativas += 1
-            px, py = rng.uniform(minx, maxx), rng.uniform(miny, maxy)
-            if poly.contains(Point(px, py)):
-                registos.append({
-                    'Lat': py,
-                    'Lon': px,
-                    'Importancia': float(rng.integers(1, 11)),
-                    'Acidente': int(rng.random() < 0.12),
-                })
-                gerados += 1
-    return pd.DataFrame(registos)
 
 
 def score_incidentes_com_decaimento(datas_incidentes, lambda_anual=0.3,
@@ -500,12 +549,4 @@ def gerar_justificativa(df, distancias, pesos, top_k=3):
             'alerta': margem,
         })
     return justificativas
-
-
-DADOS_EXEMPLO = pd.DataFrame({
-    'Zona_Patrulha':        [1, 2, 3, 4, 5, 6],
-    'Num_Incidentes':       [120, 85, 200, 40, 60, 30],
-    'Importancia':          [8, 6, 9, 4, 5, 3],
-    'Acidentes_Ultimo_Ano': [5, 3, 8, 1, 2, 1],
-})
 
