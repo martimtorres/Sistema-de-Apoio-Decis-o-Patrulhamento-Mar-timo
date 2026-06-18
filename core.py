@@ -55,6 +55,30 @@ COSTA_PONTOS = [
 ]
 COSTA = LineString(COSTA_PONTOS)
 
+# Referências simplificadas das principais ilhas portuguesas.
+# Usadas apenas para calcular a distância à costa/faixa de patrulha de
+# ocorrências nos Açores, Madeira, Porto Santo e Selvagens. Não substitui
+# cartografia oficial; evita é classificar estes incidentes pela distância
+# ao continente.
+ILHAS_PT_PONTOS = [
+    # Açores
+    (-31.13, 39.45),  # Flores
+    (-31.11, 39.70),  # Corvo
+    (-28.70, 38.58),  # Faial
+    (-28.33, 38.47),  # Pico
+    (-28.05, 38.65),  # São Jorge
+    (-28.02, 39.05),  # Graciosa
+    (-27.22, 38.72),  # Terceira
+    (-25.47, 37.78),  # São Miguel
+    (-25.10, 36.97),  # Santa Maria
+    # Madeira
+    (-16.95, 32.75),  # Madeira
+    (-16.35, 33.05),  # Porto Santo
+    (-16.50, 32.50),  # Desertas
+    (-15.87, 30.15),  # Selvagens
+]
+ILHAS_PT = [Point(lon, lat) for lon, lat in ILHAS_PT_PONTOS]
+
 NM_EM_METROS = 1852.0
 LIMITES_NM = [12, 24, 50, 100, 200]   # fronteiras Z1|Z2|Z3|Z4|Z5|Z6
 
@@ -167,10 +191,21 @@ def calcular_distancias(pos_navio, zonas=ZONAS_POLIGONOS):
 
 
 def distancia_costa_km(lat, lon):
-    """Distância (km) de um ponto à linha de costa (não a uma zona)."""
+    """Distância (km) ao ponto/linha de costa portuguesa mais próximo.
+
+    Para o continente usa a linha de costa simplificada; para Açores/Madeira
+    usa pontos de referência das ilhas principais. Assim, uma ocorrência nos
+    Açores ou na Madeira não é classificada como se estivesse a centenas de
+    milhas do continente.
+    """
     ponto = Point(lon, lat)
     p_proximo, _ = nearest_points(COSTA, ponto)
-    return haversine_km(lat, lon, p_proximo.y, p_proximo.x)
+    melhor = haversine_km(lat, lon, p_proximo.y, p_proximo.x)
+    for ilha in ILHAS_PT:
+        d = haversine_km(lat, lon, ilha.y, ilha.x)
+        if d < melhor:
+            melhor = d
+    return melhor
 
 
 def distancia_costa_nm(lat, lon):
@@ -195,20 +230,39 @@ def ponto_em_terra(lat, lon):
     return MASSA_TERRESTRE.contains(Point(lon, lat))
 
 
+def identificar_teatro_maritimo(lat, lon):
+    """Identifica se a coordenada cai num dos espaços marítimos portugueses.
+
+    A filtragem é feita por janelas geográficas largas para manter todas as
+    ocorrências marítimas portuguesas do Continente, Açores e Madeira, sem
+    apagar pontos de zonas mais afastadas. Registos globais reportados por
+    Portugal, mas fora destas áreas, ficam excluídos.
+    """
+    lat = float(lat)
+    lon = float(lon)
+
+    # Portugal continental e mar adjacente, incluindo faixas para ZEE.
+    if 35.0 <= lat <= 41.95 and -13.5 <= lon <= -6.5:
+        return "Continente"
+
+    # Açores e mar adjacente.
+    if 34.0 <= lat <= 41.5 and -33.5 <= lon <= -22.0:
+        return "Açores"
+
+    # Madeira, Porto Santo, Desertas e Selvagens.
+    if 30.0 <= lat <= 34.5 and -19.0 <= lon <= -14.0:
+        return "Madeira"
+
+    return None
+
+
 def em_aguas_portugal(lat, lon):
-    """Bounding boxes aproximadas: continente, Açores e Madeira."""
-    if 36.3 <= lat <= 42.0 and -10.8 <= lon <= -7.0:
-        return True
-    if 36.0 <= lat <= 40.5 and -31.8 <= lon <= -24.0:
-        return True
-    if 32.0 <= lat <= 33.6 and -17.8 <= lon <= -15.3:
-        return True
-    return False
+    """True se a coordenada estiver numa janela marítima portuguesa."""
+    return identificar_teatro_maritimo(lat, lon) is not None
 
 
-# Trechos da costa usados para separar o lado marítimo do lado terrestre.
-# Índice 17 ≈ Sagres/Cabo de São Vicente: acima usa-se a costa oeste;
-# abaixo usa-se a costa sul do Algarve.
+# Trechos da costa usados para corrigir visualmente coordenadas costeiras que
+# vêm registadas como "mar", mas aparecem ligeiramente em terra no mapa.
 _COSTA_OESTE = COSTA_PONTOS[:18]
 _COSTA_SUL = COSTA_PONTOS[17:]
 
@@ -222,7 +276,6 @@ def _interp_lon_costa_oeste(lat):
             candidatos.append(lon1 + t * (lon2 - lon1))
     if not candidatos:
         return None
-    # Normalmente há apenas um candidato; a mediana evita saltos em zonas recortadas.
     return float(np.median(candidatos))
 
 
@@ -238,49 +291,60 @@ def _interp_lat_costa_sul(lon):
     return float(np.median(candidatos))
 
 
-def ponto_em_mar_continental(lat, lon, margem_graus=0.003):
-    """
-    True se o ponto estiver no lado marítimo da costa continental portuguesa.
+def _ponto_no_lado_maritimo_continental(lat, lon, margem_graus=0.003):
+    """Verificação simples de lado mar/terra no continente.
 
-    Esta verificação remove pontos em terra que passam apenas pela bounding box,
-    incluindo pontos a leste da costa no norte/centro e pontos a norte da costa
-    no Algarve. É uma máscara geométrica simples, adequada para limpeza visual
-    do dataset do protótipo.
+    Serve só para decidir se uma coordenada deve ser ajustada visualmente para
+    o mar. Não é usada para apagar ocorrências portuguesas.
     """
-    if not (36.3 <= lat <= 42.0 and -10.8 <= lon <= -7.0):
+    if not (35.0 <= lat <= 41.95 and -13.5 <= lon <= -6.5):
         return False
 
-    # Costa oeste: mar fica a oeste da linha de costa, isto é, longitude menor.
-    if lat >= 37.20:
-        lon_costa = _interp_lon_costa_oeste(lat)
-        if lon_costa is None:
-            return False
-        return lon <= lon_costa - margem_graus
+    # A sul de Sagres/Algarve, o mar fica principalmente para sul da costa.
+    if lat < 37.20 and lon > -8.90:
+        lat_costa = _interp_lat_costa_sul(lon)
+        if lat_costa is None:
+            return True
+        return lat <= lat_costa - margem_graus
 
-    # Zona sudoeste junto a Sagres/Cabo de São Vicente.
-    if lon <= -8.90:
+    # Costa oeste: o mar fica para oeste da costa.
+    lon_costa = _interp_lon_costa_oeste(lat)
+    if lon_costa is None:
         return True
+    return lon <= lon_costa - margem_graus
 
-    # Costa sul do Algarve: mar fica a sul da linha de costa, isto é, latitude menor.
-    lat_costa = _interp_lat_costa_sul(lon)
-    if lat_costa is None:
-        return False
-    return lat <= lat_costa - margem_graus
+
+def corrigir_ponto_para_mar(lat, lon, deslocamento_graus=0.035):
+    """Corrige apenas a posição de visualização de pontos costeiros.
+
+    O ficheiro GAMA tem alguns registos classificados como "Territorial sea" ou
+    "High sea - Within EEZ" cujas coordenadas aparecem uns quilómetros em terra
+    por aproximação/erro de registo. Em vez de apagar esses incidentes, o ponto
+    é encostado à costa e deslocado ligeiramente para o lado do mar.
+    """
+    lat = float(lat)
+    lon = float(lon)
+    teatro = identificar_teatro_maritimo(lat, lon)
+    if teatro != "Continente":
+        return lat, lon
+
+    if _ponto_no_lado_maritimo_continental(lat, lon):
+        return lat, lon
+
+    ponto = Point(lon, lat)
+    p_costa, _ = nearest_points(COSTA, ponto)
+
+    # Algarve: empurra para sul.
+    if p_costa.y < 37.25 and p_costa.x > -8.95:
+        return p_costa.y - deslocamento_graus, p_costa.x
+
+    # Costa oeste: empurra para oeste.
+    return p_costa.y, p_costa.x - deslocamento_graus
 
 
 def ponto_em_mar_valido(lat, lon):
-    """True se o ponto deve ser mantido como ocorrência marítima portuguesa."""
-    if not em_aguas_portugal(lat, lon):
-        return False
-
-    # Continente: aplica máscara mar/terra para não aceitar pontos em Espanha,
-    # Galiza, interior, portos/rio ou território continental.
-    if 36.3 <= lat <= 42.0 and -10.8 <= lon <= -7.0:
-        return ponto_em_mar_continental(lat, lon)
-
-    # Açores/Madeira: os registos de porto/águas interiores já são excluídos
-    # pelo campo "Sea area of occurrence"; mantém-se o mar envolvente.
-    return True
+    """True se a coordenada pertence ao espaço marítimo português considerado."""
+    return em_aguas_portugal(lat, lon)
 
 
 def parse_coordenada_dms(texto, eixo='lat'):
@@ -369,7 +433,13 @@ def _marcar_acidente(row):
 
 
 def filtrar_incidentes_maritimos(df):
-    """Remove registos em terra, águas interiores e fora das águas jurisdicionais PT."""
+    """Mantém todas as ocorrências em território marítimo português.
+
+    Remove apenas registos de portos, rios, águas interiores, estaleiros e
+    coordenadas fora das janelas marítimas de Portugal continental, Açores e
+    Madeira. Os pontos marítimos que aparecem ligeiramente em terra são
+    corrigidos para visualização, não apagados.
+    """
     df = df.copy()
     if 'Lat' not in df.columns:
         df['Lat'] = df.get('Latitude', pd.Series(dtype=float)).apply(
@@ -380,13 +450,28 @@ def filtrar_incidentes_maritimos(df):
             lambda x: parse_coordenada_dms(x, 'lon')
         )
 
-    df = df.dropna(subset=['Lat', 'Lon'])
+    df = df.dropna(subset=['Lat', 'Lon']).copy()
+    df['Lat_original'] = df['Lat'].astype(float)
+    df['Lon_original'] = df['Lon'].astype(float)
 
     if 'Sea area of occurrence' in df.columns:
         df = df[~df['Sea area of occurrence'].isin(AREAS_TERRESTRES)]
         df = df[df['Sea area of occurrence'].isin(AREAS_MARITIMAS)]
 
-    df = df[df.apply(lambda r: ponto_em_mar_valido(float(r['Lat']), float(r['Lon'])), axis=1)]
+    df['Teatro_Maritimo'] = [
+        identificar_teatro_maritimo(lat, lon)
+        for lat, lon in zip(df['Lat_original'], df['Lon_original'])
+    ]
+    df = df[df['Teatro_Maritimo'].notna()].copy()
+
+    corrigidos = [
+        corrigir_ponto_para_mar(lat, lon)
+        for lat, lon in zip(df['Lat_original'], df['Lon_original'])
+    ]
+    if corrigidos:
+        df['Lat'] = [p[0] for p in corrigidos]
+        df['Lon'] = [p[1] for p in corrigidos]
+
     return df.reset_index(drop=True)
 
 
@@ -409,7 +494,11 @@ def normalizar_incidentes_pontuais(df_bruto):
             mar['Importancia'] = 5.0
     if 'Acidente' not in mar.columns:
         mar['Acidente'] = mar.apply(_marcar_acidente, axis=1).astype(int)
-    return mar[['Lat', 'Lon', 'Importancia', 'Acidente']].copy()
+    cols = ['Lat', 'Lon', 'Importancia', 'Acidente']
+    for extra in ['Teatro_Maritimo', 'Lat_original', 'Lon_original']:
+        if extra in mar.columns:
+            cols.append(extra)
+    return mar[cols].copy()
 
 
 def exportar_incidentes_maritimos(caminho_entrada, caminho_saida):
