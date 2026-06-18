@@ -1,4 +1,4 @@
-import streamlit as st
+mport streamlit as st
 import pandas as pd
 import numpy as np
 import folium
@@ -12,12 +12,11 @@ from shapely.ops import nearest_points
 
 from core import (
     PERFIS, ZONAS_POLIGONOS, ZONA_NOMES, ZONA_FAIXAS_NM, COSTA_PONTOS,
-    DADOS_EXEMPLO, CONSUMO_LITROS_NM_PADRAO,
+    CONSUMO_LITROS_NM_PADRAO,
     calcular_distancias, preparar_dataframe, calcular_pontuacao,
     gerar_justificativa, atribuir_zonas_pontuais, agregar_por_zona,
-    gerar_incidentes_exemplo_pontual, zona_atual_navio,
-    calcular_autonomia, circulo_autonomia, carregar_incidentes_gama,
-    normalizar_incidentes_pontuais,
+    zona_atual_navio, calcular_autonomia, circulo_autonomia,
+    carregar_incidentes_gama,
 )
 
 CSV_GAMA_PADRAO = Path(__file__).resolve().parent / "OccurrenceExport-2026-01-19 11_53.csv"
@@ -71,70 +70,25 @@ st.sidebar.markdown(
     f"({autonomia['raio_ida_volta_km']:.0f} km)"
 )
 
-st.sidebar.markdown("---")
-st.sidebar.markdown("**Base de dados de incidentes**")
-formato = st.sidebar.radio(
-    "Formato dos dados",
-    ["Agregado por zona", "Ponto a ponto (Lat/Lon)"],
-    help=(
-        "‘Agregado por zona’: um total por zona (comportamento anterior).\n\n"
-        "‘Ponto a ponto’: um incidente por linha (Lat/Lon) — a zona é "
-        "atribuída automaticamente a partir da distância à costa."
-    ),
-)
 
-pontos_zonados = None  # só populado no modo ponto a ponto, para mostrar amostra
-
-if formato == "Agregado por zona":
-    ficheiro = st.sidebar.file_uploader(
-        "Carregar CSV (opcional)", type=["csv"],
-        help="Colunas esperadas: Zona_Patrulha, Num_Incidentes, Importancia, Acidentes_Ultimo_Ano"
-    )
-    if ficheiro:
-        try:
-            dados = pd.read_csv(ficheiro)
-            st.sidebar.success(f"{len(dados)} zonas carregadas do ficheiro.")
-        except Exception as e:
-            st.sidebar.error(f"Erro ao ler CSV: {e}")
-            dados = DADOS_EXEMPLO
+# ── Base de dados fixa ────────────────────────────────────────────────────────
+# A aplicação passa a trabalhar sempre com incidentes ponto-a-ponto filtrados.
+# Não há opção de carregar dados agregados nem dados de exemplo gerados em zonas,
+# porque esses pontos artificiais podiam aparecer em terra.
+try:
+    if CSV_MARITIMO_PADRAO.exists():
+        pontos = carregar_incidentes_gama(CSV_MARITIMO_PADRAO)
+    elif CSV_GAMA_PADRAO.exists():
+        pontos = carregar_incidentes_gama(CSV_GAMA_PADRAO)
     else:
-        dados = DADOS_EXEMPLO
-else:
-    ficheiro = st.sidebar.file_uploader(
-        "Carregar CSV ponto a ponto (opcional)", type=["csv"],
-        help="Colunas esperadas: Lat, Lon, Importancia (opcional, 1–10), Acidente (opcional, 0/1)"
-    )
-    try:
-        if ficheiro:
-            bruto = pd.read_csv(ficheiro)
-            n_bruto = len(bruto)
-            pontos = normalizar_incidentes_pontuais(bruto)
-            st.sidebar.success(
-                f"{len(pontos)} incidentes marítimos "
-                f"({n_bruto - len(pontos)} em terra/porto removidos)."
-            )
-        elif CSV_MARITIMO_PADRAO.exists():
-            pontos = carregar_incidentes_gama(CSV_MARITIMO_PADRAO)
-            st.sidebar.info(f"A usar base marítima limpa ({len(pontos)} incidentes).")
-        elif CSV_GAMA_PADRAO.exists():
-            pontos = carregar_incidentes_gama(CSV_GAMA_PADRAO)
-            st.sidebar.info(
-                f"A usar export GAMA filtrado ({len(pontos)} incidentes marítimos)."
-            )
-        else:
-            pontos = gerar_incidentes_exemplo_pontual()
-            st.sidebar.info("A usar incidentes de exemplo (ponto a ponto).")
-        pontos_zonados = atribuir_zonas_pontuais(pontos)
-    except Exception as e:
-        st.sidebar.error(f"Erro ao processar CSV ponto a ponto: {e}")
-        pontos_zonados = atribuir_zonas_pontuais(gerar_incidentes_exemplo_pontual())
+        st.error("Não encontrei a base de dados de incidentes na pasta da aplicação.")
+        st.stop()
 
+    pontos_zonados = atribuir_zonas_pontuais(pontos)
     dados = agregar_por_zona(pontos_zonados)
-
-    with st.sidebar.expander("Ver atribuição automática de zonas (amostra)"):
-        amostra = pontos_zonados[['Lat', 'Lon', 'Distancia_Costa_NM', 'Zona_Patrulha']].head(15).copy()
-        amostra['Distancia_Costa_NM'] = amostra['Distancia_Costa_NM'].round(1)
-        st.dataframe(amostra, hide_index=True, use_container_width=True)
+except Exception as e:
+    st.error(f"Erro ao processar a base de dados marítima: {e}")
+    st.stop()
 
 # ── Cálculos ──────────────────────────────────────────────────────────────────
 pos_navio  = (lat, lon)
@@ -187,46 +141,34 @@ with col_mapa:
     mapa = folium.Map(location=[lat, lon], tiles="CartoDB positron")
     mapa.fit_bounds(bounds)
 
-    # ── Gerar pontos para o heatmap dentro de cada faixa ─────────────────────
-    # Para cada zona, distribui N pontos aleatórios dentro da faixa marítima
-    # correspondente, pesados pelos incidentes e gravidade.
+    # ── Heatmap com incidentes reais ─────────────────────────────────────────
+    # O heatmap já não é gerado com pontos aleatórios dentro das zonas.
+    # Usa apenas os pontos reais da base marítima limpa, evitando dados em terra.
     heat_points = []
-    rng = np.random.default_rng(seed=42)
+    pontuacao_zona = df.set_index('Zona_Patrulha')['Pontuacao'].to_dict()
 
-    for _, row in df.iterrows():
-        zona = int(row['Zona_Patrulha'])
-        poly = ZONAS_POLIGONOS.get(zona)
-        if poly is None or poly.is_empty:
-            continue
-        minx_z, miny_z, maxx_z, maxy_z = poly.bounds
+    for _, r in pontos_zonados.iterrows():
+        zona_r = int(r['Zona_Patrulha'])
+        importancia = float(r.get('Importancia', 5.0))
+        peso = max(0.05, pontuacao_zona.get(zona_r, 0.1) * max(importancia, 1.0) / 10.0)
+        heat_points.append([float(r['Lat']), float(r['Lon']), peso])
 
-        n_pontos = max(10, int(row['Num_Incidentes'] * row['Importancia'] / 5))
-        peso = float(row['Pontuacao'])
-
-        gerados, tentativas = 0, 0
-        while gerados < n_pontos and tentativas < n_pontos * 20:
-            tentativas += 1
-            px = rng.uniform(minx_z, maxx_z)
-            py = rng.uniform(miny_z, maxy_z)
-            if poly.contains(Point(px, py)):
-                heat_points.append([py, px, peso])
-                gerados += 1
-
-    HeatMap(
-        heat_points,
-        name='Heatmap de intensidade',
-        min_opacity=0.3,
-        max_opacity=0.85,
-        radius=24,
-        blur=20,
-        gradient={
-            0.0: "#313695",
-            0.3: "#74add1",
-            0.5: "#fee090",
-            0.7: "#f46d43",
-            1.0: "#a50026",
-        },
-    ).add_to(mapa)
+    if heat_points:
+        HeatMap(
+            heat_points,
+            name='Heatmap de intensidade',
+            min_opacity=0.3,
+            max_opacity=0.85,
+            radius=24,
+            blur=20,
+            gradient={
+                0.0: "#313695",
+                0.3: "#74add1",
+                0.5: "#fee090",
+                0.7: "#f46d43",
+                1.0: "#a50026",
+            },
+        ).add_to(mapa)
 
     # ── Faixas de distância (anéis paralelos à costa), com etiqueta ──────────
     for zona in range(1, 7):
@@ -305,7 +247,7 @@ with col_mapa:
     poly_top = ZONAS_POLIGONOS.get(zona_top)
     ponto_navio = Point(lon, lat)
     if poly_top is not None and not poly_top.is_empty and not poly_top.contains(ponto_navio):
-        _, alvo = nearest_points(poly_top, ponto_navio)
+        alvo, _ = nearest_points(poly_top, ponto_navio)
         folium.PolyLine(
             [[lat, lon], [alvo.y, alvo.x]],
             color="#cc0000", weight=2.5, opacity=0.75,
@@ -429,42 +371,16 @@ with col_mapa:
     mapa.get_root().add_child(cluster_js_macro)
 
     # ── Construir pontos para o MarkerCluster ─────────────────────────────────
+    # Só são usados pontos reais da base marítima limpa.
     cluster_pontos = []
-
-    if pontos_zonados is not None:
-        for _, r in pontos_zonados.iterrows():
-            cluster_pontos.append({
-                'lat':      float(r['Lat']),
-                'lon':      float(r['Lon']),
-                'zona':     int(r['Zona_Patrulha']),
-                'acidente': int(r.get('Acidente', 0)),
-                'import':   float(r.get('Importancia', 5)),
-            })
-    else:
-        rng2 = np.random.default_rng(seed=99)
-        for _, row in df.iterrows():
-            zona   = int(row['Zona_Patrulha'])
-            poly   = ZONAS_POLIGONOS.get(zona)
-            if poly is None or poly.is_empty:
-                continue
-            n_inc  = int(row['Num_Incidentes'])
-            n_acid = int(row['Acidentes_Ultimo_Ano'])
-            n_total = min(n_inc, 80)
-            minx_z, miny_z, maxx_z, maxy_z = poly.bounds
-            gerados, tentativas = 0, 0
-            while gerados < n_total and tentativas < n_total * 40:
-                tentativas += 1
-                px = rng2.uniform(minx_z, maxx_z)
-                py = rng2.uniform(miny_z, maxy_z)
-                if poly.contains(Point(px, py)):
-                    cluster_pontos.append({
-                        'lat':      py,
-                        'lon':      px,
-                        'zona':     zona,
-                        'acidente': 1 if gerados < n_acid else 0,
-                        'import':   float(row['Importancia']),
-                    })
-                    gerados += 1
+    for _, r in pontos_zonados.iterrows():
+        cluster_pontos.append({
+            'lat':      float(r['Lat']),
+            'lon':      float(r['Lon']),
+            'zona':     int(r['Zona_Patrulha']),
+            'acidente': int(r.get('Acidente', 0)),
+            'import':   float(r.get('Importancia', 5)),
+        })
 
     # ── Criar o MarkerClusterGroup com opções ─────────────────────────────────
     mc = MarkerCluster(
@@ -669,3 +585,4 @@ ax.grid(axis='x', linestyle='--', alpha=0.4)
 ax.set_axisbelow(True)
 plt.tight_layout()
 st.pyplot(fig)
+
