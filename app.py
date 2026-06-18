@@ -6,16 +6,22 @@ from folium.plugins import HeatMap, MarkerCluster
 from branca.element import MacroElement, Template
 from streamlit_folium import st_folium
 import matplotlib.pyplot as plt
+from pathlib import Path
 from shapely.geometry import Point, mapping
 from shapely.ops import nearest_points
 
 from core import (
     PERFIS, ZONAS_POLIGONOS, ZONA_NOMES, ZONA_FAIXAS_NM, COSTA_PONTOS,
-    DADOS_EXEMPLO,
+    DADOS_EXEMPLO, CONSUMO_LITROS_NM_PADRAO,
     calcular_distancias, preparar_dataframe, calcular_pontuacao,
     gerar_justificativa, atribuir_zonas_pontuais, agregar_por_zona,
     gerar_incidentes_exemplo_pontual, zona_atual_navio,
+    calcular_autonomia, circulo_autonomia, carregar_incidentes_gama,
+    normalizar_incidentes_pontuais,
 )
+
+CSV_GAMA_PADRAO = Path(__file__).resolve().parent / "OccurrenceExport-2026-01-19 11_53.csv"
+CSV_MARITIMO_PADRAO = Path(__file__).resolve().parent / "OccurrenceExport-maritimo.csv"
 
 # ── Paleta para as faixas de distância (neutra, para não competir com o heatmap)
 CORES_ZONA = {
@@ -44,6 +50,26 @@ st.sidebar.markdown("---")
 st.sidebar.markdown("**Posição do navio**")
 lat = st.sidebar.number_input("Latitude",  value=38.50, format="%.4f")
 lon = st.sidebar.number_input("Longitude", value=-9.00, format="%.4f")
+
+st.sidebar.markdown("---")
+st.sidebar.markdown("**Combustível e autonomia**")
+combustivel_litros = st.sidebar.number_input(
+    "Combustível disponível (L)",
+    min_value=0.0, value=5000.0, step=100.0,
+    help="Quantidade de combustível a bordo para calcular o alcance.",
+)
+consumo_litros_nm = st.sidebar.number_input(
+    "Consumo (L/NM)",
+    min_value=0.1, value=float(CONSUMO_LITROS_NM_PADRAO), step=0.5,
+    help="Litros consumidos por milha náutica percorrida.",
+)
+autonomia = calcular_autonomia(combustivel_litros, consumo_litros_nm)
+st.sidebar.markdown(
+    f"- Alcance total: **{autonomia['alcance_total_nm']:.1f} NM** "
+    f"({autonomia['alcance_total_km']:.0f} km)\n"
+    f"- Raio ida e volta: **{autonomia['raio_ida_volta_nm']:.1f} NM** "
+    f"({autonomia['raio_ida_volta_km']:.0f} km)"
+)
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("**Base de dados de incidentes**")
@@ -80,8 +106,21 @@ else:
     )
     try:
         if ficheiro:
-            pontos = pd.read_csv(ficheiro)
-            st.sidebar.success(f"{len(pontos)} incidentes carregados do ficheiro.")
+            bruto = pd.read_csv(ficheiro)
+            n_bruto = len(bruto)
+            pontos = normalizar_incidentes_pontuais(bruto)
+            st.sidebar.success(
+                f"{len(pontos)} incidentes marítimos "
+                f"({n_bruto - len(pontos)} em terra/porto removidos)."
+            )
+        elif CSV_MARITIMO_PADRAO.exists():
+            pontos = carregar_incidentes_gama(CSV_MARITIMO_PADRAO)
+            st.sidebar.info(f"A usar base marítima limpa ({len(pontos)} incidentes).")
+        elif CSV_GAMA_PADRAO.exists():
+            pontos = carregar_incidentes_gama(CSV_GAMA_PADRAO)
+            st.sidebar.info(
+                f"A usar export GAMA filtrado ({len(pontos)} incidentes marítimos)."
+            )
         else:
             pontos = gerar_incidentes_exemplo_pontual()
             st.sidebar.info("A usar incidentes de exemplo (ponto a ponto).")
@@ -115,8 +154,11 @@ col_mapa, col_info = st.columns([1.3, 1])
 with col_mapa:
     st.subheader("🗺️ Mapa operacional")
     st.caption(
-        f"📍 O navio está atualmente na **Zona {zona_navio} — "
-        f"{ZONA_NOMES[zona_navio]}** ({ZONA_FAIXAS_NM[zona_navio]} da costa)."
+        f"📍 O navio está na **Zona {zona_navio} — "
+        f"{ZONA_NOMES[zona_navio]}** ({ZONA_FAIXAS_NM[zona_navio]} da costa).  \n"
+        f"⛽ Autonomia: **{autonomia['alcance_total_nm']:.1f} NM** ida · "
+        f"raio ida/volta **{autonomia['raio_ida_volta_nm']:.1f} NM** "
+        f"({autonomia['raio_ida_volta_km']:.0f} km)."
     )
 
     # Enquadrar o mapa pelas zonas 1–5 (a zona 6 / alto mar é aberta e
@@ -206,6 +248,35 @@ with col_mapa:
         color="#37474f", weight=1.6, opacity=0.6, dash_array="2 6",
         tooltip="Linha de costa (referência)",
     ).add_to(mapa)
+
+    # ── Círculo de autonomia (ida e volta) ───────────────────────────────────
+    if autonomia['raio_ida_volta_km'] > 0:
+        raio_m = autonomia['raio_ida_volta_km'] * 1000.0
+        folium.Circle(
+            location=[lat, lon],
+            radius=raio_m,
+            color="#1565c0",
+            weight=2,
+            opacity=0.85,
+            fill=True,
+            fill_color="#42a5f5",
+            fill_opacity=0.12,
+            tooltip=(
+                f"Autonomia ida e volta: {autonomia['raio_ida_volta_nm']:.1f} NM "
+                f"({autonomia['raio_ida_volta_km']:.0f} km)"
+            ),
+        ).add_to(mapa)
+
+        coords_circulo = circulo_autonomia(lat, lon, autonomia['raio_ida_volta_km'])
+        if coords_circulo:
+            folium.PolyLine(
+                [[c[1], c[0]] for c in coords_circulo],
+                color="#1565c0",
+                weight=1.5,
+                opacity=0.55,
+                dash_array="4 6",
+                tooltip="Limite de autonomia (ida e volta)",
+            ).add_to(mapa)
 
     # ── Marcador do navio ────────────────────────────────────────────────────
     folium.Marker(
