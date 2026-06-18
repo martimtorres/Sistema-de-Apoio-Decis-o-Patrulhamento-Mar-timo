@@ -1,4 +1,5 @@
-stema de Apoio à Decisão para Patrulhamento Marítimo — núcleo.
+"""
+Sistema de Apoio à Decisão para Patrulhamento Marítimo — núcleo.
 
 Inclui: perfis de pesos, decaimento temporal, e divisão do mar em faixas
 de distância à costa portuguesa (Z1..Z6), construídas por buffers
