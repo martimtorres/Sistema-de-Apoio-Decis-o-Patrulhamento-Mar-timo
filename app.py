@@ -3,9 +3,9 @@ import pandas as pd
 import numpy as np
 import folium
 from folium.plugins import HeatMap, MarkerCluster
+from branca.element import MacroElement, Template
 from streamlit_folium import st_folium
 import matplotlib.pyplot as plt
-import json
 from shapely.geometry import Point, mapping
 from shapely.ops import nearest_points
 
@@ -158,6 +158,7 @@ with col_mapa:
 
     HeatMap(
         heat_points,
+        name='Heatmap de intensidade',
         min_opacity=0.3,
         max_opacity=0.85,
         radius=24,
@@ -227,66 +228,13 @@ with col_mapa:
             dash_array="6 4",
         ).add_to(mapa)
 
-    # ── Clustering dinâmico com Leaflet.MarkerCluster ────────────────────────
-    # Injeta CSS + JS do MarkerCluster via macro Folium, e depois cria os
-    # marcadores individuais (um por incidente pontual, ou N sintéticos por
-    # zona quando os dados são agregados), para que o clustering seja feito
-    # pelo browser e responda ao zoom.
+    # ══════════════════════════════════════════════════════════════════════════
+    # CLUSTERING DINÂMICO — usa folium.plugins.MarkerCluster (nativo)
+    # Funciona dentro do iframe do st_folium porque o plugin já inclui o
+    # leaflet.markercluster no HTML do mapa gerado pelo Folium.
+    # ══════════════════════════════════════════════════════════════════════════
 
-    # ── Determinar pontos individuais para clustering ─────────────────────────
-    # Modo ponto-a-ponto: usa os pontos reais.
-    # Modo agregado: distribui pontos representativos dentro da faixa de zona.
-    cluster_pontos = []  # lista de dicts: lat, lon, zona, incidente(0/1)
-
-    if pontos_zonados is not None:
-        # Dados ponto-a-ponto: cada linha é um incidente real
-        for _, r in pontos_zonados.iterrows():
-            cluster_pontos.append({
-                'lat':      float(r['Lat']),
-                'lon':      float(r['Lon']),
-                'zona':     int(r['Zona_Patrulha']),
-                'acidente': int(r.get('Acidente', 0)),
-                'import':   float(r.get('Importancia', 5)),
-            })
-    else:
-        # Dados agregados: distribui pontos sintéticos dentro de cada faixa
-        rng2 = np.random.default_rng(seed=99)
-        for _, row in df.iterrows():
-            zona = int(row['Zona_Patrulha'])
-            poly = ZONAS_POLIGONOS.get(zona)
-            if poly is None or poly.is_empty:
-                continue
-            n_inc  = int(row['Num_Incidentes'])
-            n_acid = int(row['Acidentes_Ultimo_Ano'])
-            minx_z, miny_z, maxx_z, maxy_z = poly.bounds
-            # Gera até 60 pontos por zona (máx visual razoável)
-            n_total = min(n_inc, 60)
-            gerados = 0
-            tentativas = 0
-            while gerados < n_total and tentativas < n_total * 40:
-                tentativas += 1
-                px = rng2.uniform(minx_z, maxx_z)
-                py = rng2.uniform(miny_z, maxy_z)
-                if poly.contains(Point(px, py)):
-                    # Marca proporcionalmente como acidente
-                    is_acid = 1 if gerados < n_acid else 0
-                    cluster_pontos.append({
-                        'lat':      py,
-                        'lon':      px,
-                        'zona':     zona,
-                        'acidente': is_acid,
-                        'import':   float(row['Importancia']),
-                    })
-                    gerados += 1
-
-    # ── Serializa pontos como JSON e injeta JS ────────────────────────────────
-    pontos_json = json.dumps(cluster_pontos)
-
-    # Nomes de zonas e faixas para popup
-    zona_nomes_json  = json.dumps(ZONA_NOMES)
-    zona_faixas_json = json.dumps(ZONA_FAIXAS_NM)
-
-    # Estatísticas por zona para o popup (incidentes totais, acidentes totais, gravidade)
+    # ── Estatísticas por zona para os popups ─────────────────────────────────
     stats_zona = {}
     for _, row in df.iterrows():
         z = int(row['Zona_Patrulha'])
@@ -296,189 +244,206 @@ with col_mapa:
             'gravidade':  round(float(row['Importancia']), 1),
             'pontuacao':  round(float(row['Pontuacao']), 3),
         }
-    stats_json = json.dumps(stats_zona)
 
-    # Macro que injeta o CSS+JS do MarkerCluster e os clusters numéricos
-    cluster_macro = folium.MacroElement()
-    cluster_macro._template = folium.utilities.parse_options(
-        name='cluster_macro',
-        container='body',
-    )
-    cluster_macro._template = folium.MacroElement()._template
+    # ── CSS customizado injectado via MacroElement (fica DENTRO do iframe) ───
+    custom_css_macro = MacroElement()
+    custom_css_macro._template = Template("""
+        {% macro header(this, kwargs) %}
+        <style>
+        .cluster-custom {
+            background: radial-gradient(circle, rgba(244,109,67,0.95) 0%, rgba(165,0,38,0.90) 100%) !important;
+            border: 3px solid #fff !important;
+            border-radius: 50% !important;
+            color: #fff !important;
+            font-weight: 900 !important;
+            display: flex !important;
+            flex-direction: column !important;
+            align-items: center !important;
+            justify-content: center !important;
+            line-height: 1.1 !important;
+            box-shadow: 0 3px 10px rgba(0,0,0,0.5) !important;
+        }
+        .cl-num  { font-size: 14px; font-weight: 900; }
+        .cl-acid { font-size: 9px;  opacity: 0.90; margin-top: 1px; }
+        .mk-incidente {
+            background: rgba(230,90,40,0.88);
+            border: 2px solid #fff;
+            border-radius: 50%;
+            width: 24px; height: 24px;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 10px; font-weight: 800; color: #fff;
+            box-shadow: 0 1px 5px rgba(0,0,0,0.4);
+        }
+        .mk-acidente {
+            background: rgba(140,0,26,0.92);
+            border: 3px solid #ffcc00;
+            border-radius: 50%;
+            width: 26px; height: 26px;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 11px; font-weight: 900; color: #fff;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.5);
+        }
+        </style>
+        {% endmacro %}
+    """)
+    mapa.get_root().add_child(custom_css_macro)
 
-    # Injeção direta via Element
-    from folium import Element
-
-    css_cdn = (
-        '<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css"/>'
-        '<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css"/>'
-    )
-    js_cdn = '<script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>'
-
-    mapa.get_root().header.add_child(Element(css_cdn))
-    mapa.get_root().header.add_child(Element(js_cdn))
-
-    # CSS personalizado para os clusters numéricos
-    custom_css = """
-    <style>
-    .cluster-incidentes {
-        background: radial-gradient(circle, rgba(244,109,67,0.92) 0%, rgba(165,0,38,0.88) 100%);
-        border: 3px solid #fff;
-        border-radius: 50%;
-        color: #fff;
-        font-weight: 800;
-        font-size: 13px;
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        justify-content: center;
-        line-height: 1.1;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.45);
-    }
-    .cluster-incidentes .cl-inc { font-size: 13px; font-weight: 900; }
-    .cluster-incidentes .cl-acid { font-size: 9px; opacity: 0.88; margin-top: 1px; }
-    .marker-incidente {
-        background: rgba(244,109,67,0.85);
-        border: 2px solid #fff;
-        border-radius: 50%;
-        width: 26px; height: 26px;
-        display: flex; align-items: center; justify-content: center;
-        font-size: 10px; font-weight: 800; color: #fff;
-        box-shadow: 0 1px 5px rgba(0,0,0,0.4);
-    }
-    .marker-acidente {
-        background: rgba(165,0,38,0.9);
-        border: 2px solid #ffcc00;
-        border-radius: 50%;
-        width: 28px; height: 28px;
-        display: flex; align-items: center; justify-content: center;
-        font-size: 10px; font-weight: 900; color: #fff;
-        box-shadow: 0 1px 5px rgba(0,0,0,0.5);
-    }
-    </style>
-    """
-    mapa.get_root().header.add_child(Element(custom_css))
-
-    # JS que cria o MarkerClusterGroup e popula com os pontos
-    cluster_js = f"""
-    <script>
-    (function() {{
-        // Aguarda o mapa Folium estar disponível
-        function initClusters() {{
-            // Tenta encontrar o mapa Leaflet criado pelo Folium
-            var mapObj = null;
-            for (var key in window) {{
-                if (window[key] && window[key]._leaflet_id !== undefined &&
-                    typeof window[key].addLayer === 'function') {{
-                    mapObj = window[key];
-                    break;
-                }}
-            }}
-            if (!mapObj) {{ setTimeout(initClusters, 200); return; }}
-
-            var pontos      = {pontos_json};
-            var zonaNomes   = {zona_nomes_json};
-            var zonaFaixas  = {zona_faixas_json};
-            var statsZona   = {stats_json};
-
-            // Configuração do cluster
-            var clusterGroup = L.markerClusterGroup({{
-                maxClusterRadius: function(zoom) {{
-                    if (zoom <= 5)  return 120;
-                    if (zoom <= 6)  return 90;
-                    if (zoom <= 7)  return 70;
-                    if (zoom <= 8)  return 50;
-                    if (zoom <= 9)  return 35;
-                    if (zoom <= 10) return 20;
-                    return 10;
-                }},
-                iconCreateFunction: function(cluster) {{
-                    var markers = cluster.getAllChildMarkers();
-                    var totalInc  = markers.length;
-                    var totalAcid = markers.filter(function(m) {{ return m.options.isAcidente; }}).length;
-
-                    // Tamanho do círculo conforme quantidade
-                    var size = totalInc > 100 ? 58 :
-                               totalInc > 50  ? 50 :
-                               totalInc > 20  ? 44 :
-                               totalInc > 10  ? 38 : 32;
-
-                    var acidLabel = totalAcid > 0
-                        ? '<span class="cl-acid">⚠ ' + totalAcid + ' acid.</span>'
-                        : '';
-
-                    return L.divIcon({{
-                        html: '<div class="cluster-incidentes" style="width:' + size + 'px;height:' + size + 'px;">'
-                            + '<span class="cl-inc">' + totalInc + '</span>'
-                            + acidLabel
-                            + '</div>',
-                        className: '',
-                        iconSize: [size, size],
-                        iconAnchor: [size/2, size/2],
-                    }});
-                }},
-                spiderfyOnMaxZoom: true,
-                showCoverageOnHover: false,
-                zoomToBoundsOnClick: true,
-                animate: true,
-                animateAddingMarkers: false,
-            }});
-
-            // Adiciona marcador individual por ponto
-            pontos.forEach(function(p) {{
-                var isAcid = p.acidente === 1;
-                var zona   = p.zona;
-                var stats  = statsZona[zona] || {{}};
-                var nome   = zonaNomes[zona]  || ('Zona ' + zona);
-                var faixa  = zonaFaixas[zona] || '';
-
-                var iconHtml = isAcid
-                    ? '<div class="marker-acidente">⚠</div>'
-                    : '<div class="marker-incidente">●</div>';
-
-                var icon = L.divIcon({{
-                    html: iconHtml,
+    # ── JS para substituir ícones do MarkerCluster após render ───────────────
+    # O MarkerCluster nativo usa classes CSS leaflet-marker-icon; interceptamos
+    # o evento clusteringend para redesenhar os ícones com os nossos valores.
+    cluster_js_macro = MacroElement()
+    cluster_js_macro._template = Template("""
+        {% macro script(this, kwargs) %}
+        (function() {
+            // Redesenha cada cluster com contagem numérica customizada
+            function styleCluster(cluster) {
+                var count = cluster.getChildCount();
+                var size  = count > 200 ? 62 : count > 100 ? 54 : count > 50 ? 46 : count > 20 ? 40 : count > 10 ? 34 : 28;
+                // Conta acidentes nos filhos (marcadores com classe mk-acidente no HTML)
+                var nAcid = 0;
+                cluster.getAllChildMarkers().forEach(function(m) {
+                    if (m.options && m.options.isAcidente) nAcid++;
+                });
+                var acidHtml = nAcid > 0 ? '<span class="cl-acid">⚠ '+nAcid+' acid.</span>' : '';
+                return L.divIcon({
+                    html: '<div class="cluster-custom" style="width:'+size+'px;height:'+size+'px;">'
+                        + '<span class="cl-num">'+count+'</span>'
+                        + acidHtml
+                        + '</div>',
                     className: '',
-                    iconSize: [isAcid ? 28 : 26, isAcid ? 28 : 26],
-                    iconAnchor: [isAcid ? 14 : 13, isAcid ? 14 : 13],
-                }});
+                    iconSize: L.point(size, size),
+                    iconAnchor: L.point(size/2, size/2)
+                });
+            }
+            // Aguarda o mapa e injeta iconCreateFunction em todos os MarkerClusterGroup
+            function patchClusters() {
+                if (typeof L === 'undefined') { setTimeout(patchClusters, 150); return; }
+                // Procura todas as layers do tipo MarkerClusterGroup
+                document.querySelectorAll('.leaflet-container').forEach(function(el) {
+                    var mapId = el._leaflet_id;
+                    if (!mapId) return;
+                    // Percorre as layers registadas no Leaflet
+                    Object.values(L.map ? {} : {}).forEach(function(){});
+                });
+                // Abordagem alternativa: escuta eventos globais do Leaflet
+                if (window._leaflet_map_patched) return;
+                window._leaflet_map_patched = true;
+                var origAddLayer = L.Map.prototype.addLayer;
+                L.Map.prototype.addLayer = function(layer) {
+                    if (layer instanceof L.MarkerClusterGroup) {
+                        layer.options.iconCreateFunction = styleCluster;
+                        layer.refreshClusters && layer.refreshClusters();
+                    }
+                    return origAddLayer.apply(this, arguments);
+                };
+            }
+            setTimeout(patchClusters, 100);
+        })();
+        {% endmacro %}
+    """)
+    mapa.get_root().add_child(cluster_js_macro)
 
-                var gravLabel = stats.gravidade !== undefined
-                    ? '<tr><td><b>Gravidade média</b></td><td>' + stats.gravidade + '/10</td></tr>'
-                    : '';
-                var pontLabel = stats.pontuacao !== undefined
-                    ? '<tr><td><b>Pontuação</b></td><td>' + stats.pontuacao + '</td></tr>'
-                    : '';
+    # ── Construir pontos para o MarkerCluster ─────────────────────────────────
+    cluster_pontos = []
 
-                var popupHtml =
-                    '<div style="min-width:200px;font-size:13px;">' +
-                    '<b style="font-size:14px;">Z' + zona + ' — ' + nome + '</b><br>' +
-                    '<span style="color:#777;font-size:11px;">' + faixa + ' da costa</span>' +
-                    '<hr style="margin:5px 0;">' +
-                    '<table style="width:100%;border-collapse:collapse;">' +
-                    '<tr><td><b>Total incidentes</b></td><td><b style="color:#d62728;">' + stats.incidentes + '</b></td></tr>' +
-                    '<tr><td><b>Total acidentes</b></td><td><b style="color:#a50026;">' + stats.acidentes + '</b></td></tr>' +
-                    gravLabel + pontLabel +
-                    '<tr><td colspan="2" style="padding-top:4px;font-size:11px;color:#555;">' +
-                    (isAcid ? '⚠️ Este ponto é um <b>acidente</b>' : '📍 Incidente nesta zona') +
-                    '</td></tr>' +
-                    '</table></div>';
+    if pontos_zonados is not None:
+        for _, r in pontos_zonados.iterrows():
+            cluster_pontos.append({
+                'lat':      float(r['Lat']),
+                'lon':      float(r['Lon']),
+                'zona':     int(r['Zona_Patrulha']),
+                'acidente': int(r.get('Acidente', 0)),
+                'import':   float(r.get('Importancia', 5)),
+            })
+    else:
+        rng2 = np.random.default_rng(seed=99)
+        for _, row in df.iterrows():
+            zona   = int(row['Zona_Patrulha'])
+            poly   = ZONAS_POLIGONOS.get(zona)
+            if poly is None or poly.is_empty:
+                continue
+            n_inc  = int(row['Num_Incidentes'])
+            n_acid = int(row['Acidentes_Ultimo_Ano'])
+            n_total = min(n_inc, 80)
+            minx_z, miny_z, maxx_z, maxy_z = poly.bounds
+            gerados, tentativas = 0, 0
+            while gerados < n_total and tentativas < n_total * 40:
+                tentativas += 1
+                px = rng2.uniform(minx_z, maxx_z)
+                py = rng2.uniform(miny_z, maxy_z)
+                if poly.contains(Point(px, py)):
+                    cluster_pontos.append({
+                        'lat':      py,
+                        'lon':      px,
+                        'zona':     zona,
+                        'acidente': 1 if gerados < n_acid else 0,
+                        'import':   float(row['Importancia']),
+                    })
+                    gerados += 1
 
-                var marker = L.marker([p.lat, p.lon], {{
-                    icon: icon,
-                    isAcidente: isAcid,
-                }}).bindPopup(popupHtml, {{ maxWidth: 240 }});
+    # ── Criar o MarkerClusterGroup com opções ─────────────────────────────────
+    mc = MarkerCluster(
+        options={
+            'maxClusterRadius': 60,
+            'spiderfyOnMaxZoom': True,
+            'showCoverageOnHover': False,
+            'zoomToBoundsOnClick': True,
+            'animate': True,
+            'disableClusteringAtZoom': 12,
+        },
+        name='Incidentes / Acidentes',
+    )
 
-                clusterGroup.addLayer(marker);
-            }});
+    for p in cluster_pontos:
+        zona  = p['zona']
+        stats = stats_zona.get(zona, {})
+        nome  = ZONA_NOMES.get(zona, f"Zona {zona}")
+        faixa = ZONA_FAIXAS_NM.get(zona, "")
+        is_acid = p['acidente'] == 1
 
-            mapObj.addLayer(clusterGroup);
-        }}
-        setTimeout(initClusters, 400);
-    }})();
-    </script>
-    """
-    mapa.get_root().html.add_child(Element(cluster_js))
+        icon_html = (
+            '<div class="mk-acidente">⚠</div>' if is_acid
+            else '<div class="mk-incidente">●</div>'
+        )
+        icon = folium.DivIcon(
+            html=icon_html,
+            icon_size=(28 if is_acid else 24, 28 if is_acid else 24),
+            icon_anchor=(14 if is_acid else 12, 14 if is_acid else 12),
+            class_name='',
+        )
+
+        popup_html = f"""
+        <div style="min-width:200px;font-size:13px;">
+          <b style="font-size:14px;">Z{zona} — {nome}</b><br>
+          <span style="color:#777;font-size:11px;">{faixa} da costa</span>
+          <hr style="margin:5px 0;">
+          <table style="width:100%;border-collapse:collapse;font-size:12px;">
+            <tr><td>Total incidentes</td>
+                <td><b style="color:#d62728;">{stats.get('incidentes','—')}</b></td></tr>
+            <tr><td>Total acidentes</td>
+                <td><b style="color:#a50026;">{stats.get('acidentes','—')}</b></td></tr>
+            <tr><td>Gravidade média</td>
+                <td>{stats.get('gravidade','—')}/10</td></tr>
+            <tr><td>Pontuação</td>
+                <td>{stats.get('pontuacao','—')}</td></tr>
+            <tr><td colspan="2" style="padding-top:5px;font-size:11px;color:#555;">
+              {'⚠️ <b>Acidente</b> nesta zona' if is_acid else '📍 Incidente nesta zona'}
+            </td></tr>
+          </table>
+        </div>
+        """
+
+        folium.Marker(
+            location=[p['lat'], p['lon']],
+            icon=icon,
+            popup=folium.Popup(popup_html, max_width=240),
+            tooltip=f"{'⚠ Acidente' if is_acid else 'Incidente'} — Z{zona} {nome}",
+        ).add_to(mc)
+
+    mc.add_to(mapa)
+
+    # Controlo de camadas (heatmap vs clusters)
+    folium.LayerControl(collapsed=False).add_to(mapa)
 
     st_folium(mapa, height=520, use_container_width=True)
 
