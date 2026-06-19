@@ -55,11 +55,46 @@ COSTA_PONTOS = [
 ]
 COSTA = LineString(COSTA_PONTOS)
 
-# Referências simplificadas das principais ilhas portuguesas.
-# Usadas apenas para calcular a distância à costa/faixa de patrulha de
-# ocorrências nos Açores, Madeira, Porto Santo e Selvagens. Não substitui
-# cartografia oficial; evita é classificar estes incidentes pela distância
-# ao continente.
+# ── Linhas de costa simplificadas dos arquipélagos (lon, lat).
+# Cada arquipélago é representado pela sua costa exterior (loop fechado),
+# o que permite gerar buffers em metros a partir do contorno real de cada ilha.
+# São simplificações para apoio à decisão — não substitui cartografia oficial.
+
+# Açores: grupo ocidental, central e oriental
+ACORES_CONTORNOS = [
+    # Flores
+    [(-31.27, 39.51), (-31.19, 39.37), (-31.08, 39.37), (-31.00, 39.51), (-31.27, 39.51)],
+    # Corvo
+    [(-31.13, 39.77), (-31.08, 39.68), (-31.19, 39.63), (-31.23, 39.72), (-31.13, 39.77)],
+    # Faial
+    [(-28.83, 38.62), (-28.75, 38.51), (-28.62, 38.50), (-28.55, 38.60), (-28.70, 38.68), (-28.83, 38.62)],
+    # Pico
+    [(-28.53, 38.55), (-28.10, 38.38), (-27.97, 38.42), (-28.08, 38.57), (-28.53, 38.55)],
+    # São Jorge
+    [(-28.26, 38.77), (-27.90, 38.63), (-27.75, 38.65), (-28.07, 38.78), (-28.26, 38.77)],
+    # Graciosa
+    [(-28.10, 39.10), (-27.97, 39.02), (-27.93, 39.07), (-28.05, 39.15), (-28.10, 39.10)],
+    # Terceira
+    [(-27.40, 38.80), (-27.15, 38.65), (-26.97, 38.72), (-27.23, 38.83), (-27.40, 38.80)],
+    # São Miguel
+    [(-25.85, 37.88), (-25.47, 37.70), (-25.13, 37.73), (-25.12, 37.86), (-25.52, 37.93), (-25.85, 37.88)],
+    # Santa Maria
+    [(-25.23, 37.02), (-25.03, 36.93), (-24.87, 36.97), (-25.00, 37.08), (-25.23, 37.02)],
+]
+
+# Madeira: ilha principal, Porto Santo, Desertas, Selvagens
+MADEIRA_CONTORNOS = [
+    # Madeira
+    [(-17.27, 32.90), (-17.00, 32.62), (-16.68, 32.62), (-16.30, 32.78), (-16.68, 32.90), (-17.27, 32.90)],
+    # Porto Santo
+    [(-16.43, 33.12), (-16.28, 33.03), (-16.25, 33.08), (-16.38, 33.13), (-16.43, 33.12)],
+    # Desertas
+    [(-16.52, 32.57), (-16.48, 32.38), (-16.43, 32.50), (-16.52, 32.57)],
+    # Selvagens
+    [(-15.92, 30.18), (-15.83, 30.10), (-15.80, 30.15), (-15.92, 30.18)],
+]
+
+# ── Pontos de referência das ilhas (usados para cálculo de distância mínima)
 ILHAS_PT_PONTOS = [
     # Açores
     (-31.13, 39.45),  # Flores
@@ -99,42 +134,101 @@ ZONA_FAIXAS_NM = {
     6: "> 200 NM",
 }
 
-# ── Projeção planar local (equirretangular), só para fazer buffers em metros.
-# Erro tipicamente < 1% nesta latitude — aceitável para apoio à decisão,
-# não para fins de navegação/cartografia legal.
-_LAT_REF = 39.5
 _M_POR_GRAU_LAT = 111_320.0
-_M_POR_GRAU_LON = 111_320.0 * cos(radians(_LAT_REF))
 
 
-def _projetar(x, y, z=None):
-    return (x * _M_POR_GRAU_LON, y * _M_POR_GRAU_LAT)
+def _factory_projecao(lat_ref):
+    """Devolve funções de projeção/desprojeção equirretangular para uma latitude de referência."""
+    m_por_grau_lon = _M_POR_GRAU_LAT * cos(radians(lat_ref))
+
+    def proj(x, y, z=None):
+        return (x * m_por_grau_lon, y * _M_POR_GRAU_LAT)
+
+    def desproj(x, y, z=None):
+        return (x / m_por_grau_lon, y / _M_POR_GRAU_LAT)
+
+    return proj, desproj
 
 
-def _desprojetar(x, y, z=None):
-    return (x / _M_POR_GRAU_LON, y / _M_POR_GRAU_LAT)
+def _buffer_geografico(geom, dist_nm, lat_ref):
+    """Buffer em milhas náuticas numa geometria geográfica (EPSG:4326).
+
+    Usa projeção equirretangular local centrada em lat_ref para converter
+    a geometria para metros, faz o buffer, e regressa a graus.
+    A precisão é tipicamente < 1 % para as extensões aqui usadas.
+    """
+    proj, desproj = _factory_projecao(lat_ref)
+    geom_proj = transform(proj, geom)
+    buf_proj = geom_proj.buffer(dist_nm * NM_EM_METROS)
+    return transform(desproj, buf_proj)
 
 
 def _construir_zonas():
-    """Gera as 6 faixas (anéis) de distância à costa por buffers sucessivos."""
-    costa_proj = transform(_projetar, COSTA)
-    buffers_proj = {d: costa_proj.buffer(d * NM_EM_METROS) for d in LIMITES_NM}
-    buffers = {d: transform(_desprojetar, poly) for d, poly in buffers_proj.items()}
+    """Gera as 6 faixas (anéis) de distância à costa por buffers sucessivos.
 
-    # Máscara grosseira de "terra" (tudo a leste da linha de costa), apenas
-    # para impedir que as faixas marítimas invadam visualmente o continente.
+    Cada arquipélago (Continente, Açores, Madeira) é projetado com a sua
+    própria latitude de referência para minimizar a distorção dos buffers.
+    Os resultados são reunidos numa geometria única por distância, cobrindo
+    assim toda a extensão marítima portuguesa.
+    """
+    from shapely.ops import unary_union
+
+    # ── 1. Linha de costa do Continente
+    lat_ref_cont = 39.0
+    costa_geom = COSTA
+
+    # ── 2. Contornos dos Açores (grupo de polígonos/linhas de costa)
+    lat_ref_acores = 38.5
+    acores_geoms = [LineString(c) for c in ACORES_CONTORNOS]
+
+    # ── 3. Contornos da Madeira
+    lat_ref_madeira = 32.0
+    madeira_geoms = [LineString(c) for c in MADEIRA_CONTORNOS]
+
+    # ── 4. Buffer por distância para cada grupo, depois une tudo
+    buffers_total = {}
+    for d in LIMITES_NM:
+        partes = [_buffer_geografico(costa_geom, d, lat_ref_cont)]
+        for g in acores_geoms:
+            partes.append(_buffer_geografico(g, d, lat_ref_acores))
+        for g in madeira_geoms:
+            partes.append(_buffer_geografico(g, d, lat_ref_madeira))
+        buffers_total[d] = unary_union(partes)
+
+    # ── 5. Massa terrestre: continente + ilhas
     norte, sul = COSTA_PONTOS[0], COSTA_PONTOS[-1]
-    massa_terrestre = Polygon(COSTA_PONTOS + [(2.5, sul[1]), (2.5, norte[1])])
+    massa_continente = Polygon(COSTA_PONTOS + [(2.5, sul[1]), (2.5, norte[1])])
 
-    area_interesse = box(-15.0, 35.5, -6.0, 43.0)
+    ilhas_terra = []
+    for contorno in ACORES_CONTORNOS + MADEIRA_CONTORNOS:
+        if len(contorno) >= 3:
+            ilhas_terra.append(Polygon(contorno))
+    if ilhas_terra:
+        massa_ilhas = unary_union(ilhas_terra)
+        massa_terrestre = unary_union([massa_continente, massa_ilhas])
+    else:
+        massa_terrestre = massa_continente
 
+    # ── 6. Área de interesse: cobre toda a ZEE portuguesa
+    # Açores mais a oeste: ~-35°; Selvagens mais a sul: ~29.5°; continente a leste: ~-6°
+    area_interesse = box(-36.0, 29.0, -6.0, 43.5)
+
+    # ── 7. Construção dos anéis (diferenças entre buffers sucessivos)
     fronteiras = [0] + LIMITES_NM
     zonas = {}
     for i, (inferior, superior) in enumerate(zip(fronteiras[:-1], fronteiras[1:]), start=1):
-        anel = buffers[superior] if inferior == 0 else buffers[superior].difference(buffers[inferior])
+        anel = (
+            buffers_total[superior]
+            if inferior == 0
+            else buffers_total[superior].difference(buffers_total[inferior])
+        )
         zonas[i] = anel.intersection(area_interesse).difference(massa_terrestre)
 
-    zonas[6] = area_interesse.difference(buffers[LIMITES_NM[-1]]).difference(massa_terrestre)
+    zonas[6] = (
+        area_interesse
+        .difference(buffers_total[LIMITES_NM[-1]])
+        .difference(massa_terrestre)
+    )
     return zonas, massa_terrestre
 
 
@@ -191,20 +285,26 @@ def calcular_distancias(pos_navio, zonas=ZONAS_POLIGONOS):
 
 
 def distancia_costa_km(lat, lon):
-    """Distância (km) ao ponto/linha de costa portuguesa mais próximo.
+    """Distância (km) à linha de costa portuguesa mais próxima.
 
-    Para o continente usa a linha de costa simplificada; para Açores/Madeira
-    usa pontos de referência das ilhas principais. Assim, uma ocorrência nos
-    Açores ou na Madeira não é classificada como se estivesse a centenas de
-    milhas do continente.
+    Usa a linha de costa do continente e os contornos das ilhas dos Açores
+    e da Madeira, o que permite classificar corretamente ocorrências nesses
+    arquipélagos sem as referenciar à costa continental.
     """
     ponto = Point(lon, lat)
-    p_proximo, _ = nearest_points(COSTA, ponto)
-    melhor = haversine_km(lat, lon, p_proximo.y, p_proximo.x)
-    for ilha in ILHAS_PT:
-        d = haversine_km(lat, lon, ilha.y, ilha.x)
+
+    # Continente
+    p_cont, _ = nearest_points(COSTA, ponto)
+    melhor = haversine_km(lat, lon, p_cont.y, p_cont.x)
+
+    # Ilhas — usa os contornos (LineString) para maior precisão
+    for contorno in ACORES_CONTORNOS + MADEIRA_CONTORNOS:
+        linha = LineString(contorno)
+        p_prox, _ = nearest_points(linha, ponto)
+        d = haversine_km(lat, lon, p_prox.y, p_prox.x)
         if d < melhor:
             melhor = d
+
     return melhor
 
 
@@ -241,16 +341,16 @@ def identificar_teatro_maritimo(lat, lon):
     lat = float(lat)
     lon = float(lon)
 
-    # Portugal continental e mar adjacente, incluindo faixas para ZEE.
-    if 35.0 <= lat <= 41.95 and -13.5 <= lon <= -6.5:
+    # Portugal continental e mar adjacente (ZEE até 200 NM ≈ ~370 km ≈ ~3.3° lat/lon)
+    if 34.5 <= lat <= 43.5 and -16.0 <= lon <= -6.0:
         return "Continente"
 
-    # Açores e mar adjacente.
-    if 34.0 <= lat <= 41.5 and -33.5 <= lon <= -22.0:
+    # Açores e mar adjacente (ZEE até 200 NM em torno dos grupos)
+    if 33.0 <= lat <= 43.0 and -36.0 <= lon <= -21.0:
         return "Açores"
 
-    # Madeira, Porto Santo, Desertas e Selvagens.
-    if 30.0 <= lat <= 34.5 and -19.0 <= lon <= -14.0:
+    # Madeira, Porto Santo, Desertas e Selvagens (ZEE até 200 NM)
+    if 28.5 <= lat <= 36.0 and -20.0 <= lon <= -12.0:
         return "Madeira"
 
     return None
@@ -638,4 +738,3 @@ def gerar_justificativa(df, distancias, pesos, top_k=3):
             'alerta': margem,
         })
     return justificativas
-
