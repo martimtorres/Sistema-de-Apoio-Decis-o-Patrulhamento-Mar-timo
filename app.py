@@ -136,23 +136,25 @@ with col_mapa:
         f"reais, incluindo Continente, Açores e Madeira."
     )
 
-    # Enquadrar o mapa por todos os incidentes reais + posição do navio.
-    # Assim não desaparecem ocorrências dos Açores/Madeira nem de zonas mais
-    # afastadas da costa continental.
-    pontos_bounds = [[float(lat), float(lon)]]
+    # Enquadrar o mapa para cobrir toda a área marítima portuguesa:
+    # Açores (mais a oeste/norte), Madeira/Selvagens (mais a sul), Continente.
+    # Os bounds são sempre pelo menos a extensão da ZEE portuguesa completa.
+    BOUNDS_ZEE_PT = [
+        [28.5, -36.0],   # SW: Selvagens / Açores ocidental
+        [43.5,  -6.0],   # NE: Norte de Portugal continental
+    ]
     if not pontos_zonados.empty:
-        pontos_bounds += [
-            [float(r['Lat']), float(r['Lon'])]
-            for _, r in pontos_zonados.iterrows()
+        min_lat = min(float(r['Lat']) for _, r in pontos_zonados.iterrows())
+        max_lat = max(float(r['Lat']) for _, r in pontos_zonados.iterrows())
+        min_lon = min(float(r['Lon']) for _, r in pontos_zonados.iterrows())
+        max_lon = max(float(r['Lon']) for _, r in pontos_zonados.iterrows())
+        # Garante que os bounds não ficam mais pequenos do que a ZEE completa
+        bounds = [
+            [min(min_lat - 1.0, BOUNDS_ZEE_PT[0][0]), min(min_lon - 1.0, BOUNDS_ZEE_PT[0][1])],
+            [max(max_lat + 1.0, BOUNDS_ZEE_PT[1][0]), max(max_lon + 1.0, BOUNDS_ZEE_PT[1][1])],
         ]
-
-    min_lat = min(p[0] for p in pontos_bounds)
-    max_lat = max(p[0] for p in pontos_bounds)
-    min_lon = min(p[1] for p in pontos_bounds)
-    max_lon = max(p[1] for p in pontos_bounds)
-    margem_lat = max(0.3, (max_lat - min_lat) * 0.08)
-    margem_lon = max(0.3, (max_lon - min_lon) * 0.08)
-    bounds = [[min_lat - margem_lat, min_lon - margem_lon], [max_lat + margem_lat, max_lon + margem_lon]]
+    else:
+        bounds = BOUNDS_ZEE_PT
 
     mapa = folium.Map(location=[lat, lon], tiles="CartoDB positron")
     mapa.fit_bounds(bounds)
