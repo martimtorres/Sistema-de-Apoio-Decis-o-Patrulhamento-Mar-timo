@@ -59,8 +59,8 @@ ZONA_FAIXAS_NM = {
 # Perfis de pesos para o motor de pontuação
 PERFIS = {
     'rotina':                          {'incidentes': 0.50, 'gravidade': 0.20, 'acidentes': 0.20, 'distancia': 0.10},
-    'emergência':                      {'incidentes': 0.15, 'gravidade': 0.35, 'acidentes': 0.20, 'distancia': 0.30},
-    'condições atmosféricas adversas': {'incidentes': 0.25, 'gravidade': 0.25, 'acidentes': 0.10, 'distancia': 0.40},
+    'emergência':                      {'incidentes': 0.20, 'gravidade': 0.35, 'acidentes': 0.30, 'distancia': 0.15},
+    'condições atmosféricas adversas': {'incidentes': 0.25, 'gravidade': 0.40, 'acidentes': 0.20, 'distancia': 0.15},
 }
 
 # Mapeamento de severidade GAMA → valor numérico de importância
