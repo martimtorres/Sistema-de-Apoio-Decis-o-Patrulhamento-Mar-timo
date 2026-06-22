@@ -550,10 +550,10 @@ with col_info:
         )
 
 # ════════════════════════════════════════════════════════════════════════════
-# JUSTIFICATIVAS
+# JUSTIFICAÇÕES
 # ════════════════════════════════════════════════════════════════════════════
 st.markdown("---")
-st.subheader("📝 Justificativas das zonas prioritárias")
+st.subheader("📝 Justificações das zonas prioritárias")
 
 justs = gerar_justificacao(df, distancias, pesos, top_k=min(3, len(df)))
 for j in justs:
