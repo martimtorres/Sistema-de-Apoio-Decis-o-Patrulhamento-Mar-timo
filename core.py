@@ -539,8 +539,10 @@ def agregar_por_zona(df_pontos_com_zona):
     Garante que todas as zonas 1–6 estão presentes, mesmo com zero ocorrências.
     """
     df = df_pontos_com_zona.copy()
-    df.setdefault('Importancia', 5.0)
-    df.setdefault('Acidente', 0)
+    if 'Importancia' not in df.columns:
+        df['Importancia'] = 5.0
+    if 'Acidente' not in df.columns:
+        df['Acidente'] = 0
 
     agg = (
         df.groupby('Zona_Patrulha')
