@@ -14,7 +14,7 @@ from core import (
     PERFIS, ZONAS_POLIGONOS, ZONA_NOMES, ZONA_FAIXAS_NM, COSTA_PONTOS,
     CONSUMO_LITROS_NM_PADRAO,
     calcular_distancias, preparar_dataframe, calcular_pontuacao,
-    gerar_justificativa, atribuir_zonas_pontuais, agregar_por_zona,
+    gerar_justificação, atribuir_zonas_pontuais, agregar_por_zona,
     zona_atual_navio, calcular_autonomia, circulo_autonomia,
     carregar_incidentes_gama,
 )
@@ -555,7 +555,7 @@ with col_info:
 st.markdown("---")
 st.subheader("📝 Justificativas das zonas prioritárias")
 
-justs = gerar_justificativa(df, distancias, pesos, top_k=min(3, len(df)))
+justs = gerar_justificação(df, distancias, pesos, top_k=min(3, len(df)))
 for j in justs:
     faixa = ZONA_FAIXAS_NM.get(j['zona'], "")
     st.markdown(
