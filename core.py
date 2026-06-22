@@ -636,7 +636,7 @@ def calcular_pontuacao(df, pesos):
 def gerar_justificacao(df, distancias, pesos, top_k=3):
     """Gera justificacoes textuais para as top_k zonas recomendadas.
 
-    Identifica o critério dominante e assinala decisões apertadas (< 5 %).
+    Identifica o critério dominante e assinala decisões incertas/arriscadas (< 5 %).
     """
     criterios = {
         'incidentes': ('Num_Incidentes_norm',       'incidentes históricos'),
@@ -664,7 +664,7 @@ def gerar_justificacao(df, distancias, pesos, top_k=3):
         if i + 1 < len(work):
             diff = row['Pontuacao'] - work.iloc[i + 1]['Pontuacao']
             if row['Pontuacao'] and diff / row['Pontuacao'] < 0.05:
-                alerta = " ⚠️ decisão apertada"
+                alerta = " ⚠️ decisão incerta/arriscada"
 
         justificacoes.append({
             'posicao':            i + 1,
