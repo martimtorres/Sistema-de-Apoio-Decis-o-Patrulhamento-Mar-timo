@@ -633,8 +633,8 @@ def calcular_pontuacao(df, pesos):
     )
 
 
-def gerar_justificação(df, distancias, pesos, top_k=3):
-    """Gera justificações textuais para as top_k zonas recomendadas.
+def gerar_justificacao(df, distancias, pesos, top_k=3):
+    """Gera justificacoes textuais para as top_k zonas recomendadas.
 
     Identifica o critério dominante e assinala decisões apertadas (< 5 %).
     """
@@ -651,7 +651,7 @@ def gerar_justificação(df, distancias, pesos, top_k=3):
     work['Pontuacao'] = sum(work[f'contrib_{k}'] for k in criterios)
     work = work.sort_values('Pontuacao', ascending=False).reset_index(drop=True)
 
-    justificações = []
+    justificacoes = []
     for i in range(min(top_k, len(work))):
         row = work.iloc[i]
         zona = int(row['Zona_Patrulha'])
@@ -666,7 +666,7 @@ def gerar_justificação(df, distancias, pesos, top_k=3):
             if row['Pontuacao'] and diff / row['Pontuacao'] < 0.05:
                 alerta = " ⚠️ decisão apertada"
 
-        justificações.append({
+        justificacoes.append({
             'posicao':            i + 1,
             'zona':               zona,
             'pontuacao':          row['Pontuacao'],
@@ -679,7 +679,7 @@ def gerar_justificação(df, distancias, pesos, top_k=3):
             'alerta':             alerta,
         })
 
-    return justificações
+    return justificacoes
 
 
 # ═══════════════════════════════════════════════════════════════════════════
